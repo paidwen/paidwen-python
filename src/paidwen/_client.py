@@ -4,28 +4,77 @@ import functools
 import inspect
 import logging
 import os
+import time
 import uuid
-from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from types import TracebackType
 from typing import Any, Literal, TypeVar, cast
 
+import anyio
 import anyio.to_thread
 import httpx
+from opentelemetry import context as otel_context
+from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY
+from opentelemetry.sdk.trace import SpanProcessor
+from opentelemetry.trace import Span
 
-from ._contract import ActionContext, Cost, Decision, DecisionRequest, Problem, Tool
+from . import _context
+from ._contract import (
+    ActionContext,
+    ApprovalStatus,
+    Cost,
+    Decision,
+    DecisionRequest,
+    Problem,
+    Tool,
+)
 from ._errors import DeniedError, PaidwenError, PendingError, RequestError
+from ._journal import Journal, finish, quiet_call, started, trace_id, traceparent
 
 Fallback = Literal["allow", "block"]
+OnPending = Literal["wait", "raise"]
 
+VERSION = "0.7.0"
 DEFAULT_BASE_URL = "https://api.paidwen.com"
 DEFAULT_TIMEOUT = 3.0
+SLOW_DOWN_SECONDS = 5
+WAIT_GRACE_SECONDS = 60
 
 _CAPTURED = "_paidwen_captured"
 
 logger = logging.getLogger("paidwen")
 
 F = TypeVar("F", bound=Callable[..., Any])
+R = TypeVar("R")
+
+
+@dataclass(frozen=True)
+class Wait:
+    decision: Decision
+    approval_id: str
+    expires_at: datetime
+    interval: int
+    on_expiry: Literal["deny", "allow"]
+
+
+class _HttpStatusError(Exception):
+    pass
+
+
+def _runs(status: ApprovalStatus) -> bool:
+    return status["status"] == "approved" or (
+        status["status"] == "expired" and status["on_expiry"] == "allow"
+    )
+
+
+def _decided_at(decision: Decision) -> datetime:
+    try:
+        return datetime.fromisoformat(decision["decided_at"].replace("Z", "+00:00"))
+    except (KeyError, ValueError):
+        return datetime.now(timezone.utc)
 
 
 class Paidwen:
@@ -36,6 +85,9 @@ class Paidwen:
         base_url: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         on_unavailable: Fallback = "block",
+        on_pending: OnPending = "wait",
+        on_wait: Callable[[Wait], object] | None = None,
+        journal: bool = True,
         http_client: httpx.Client | None = None,
     ) -> None:
         key = api_key or os.environ.get("PAIDWEN_API_KEY")
@@ -43,15 +95,21 @@ class Paidwen:
             raise PaidwenError("Paidwen needs an agent key: pass api_key or set PAIDWEN_API_KEY.")
         if on_unavailable not in ("allow", "block"):
             raise PaidwenError('on_unavailable must be "allow" or "block".')
+        if on_pending not in ("wait", "raise"):
+            raise PaidwenError('on_pending must be "wait" or "raise".')
         if not timeout > 0:
             raise PaidwenError("timeout must be a positive number of seconds.")
-        base = base_url or os.environ.get("PAIDWEN_BASE_URL") or DEFAULT_BASE_URL
+        base = (base_url or os.environ.get("PAIDWEN_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
         self._api_key = key
-        self._endpoint = f"{base.rstrip('/')}/v1/decisions"
+        self._base = base
         self._timeout = timeout
         self._on_unavailable: Fallback = on_unavailable
+        self._on_pending: OnPending = on_pending
+        self._on_wait = on_wait
         self._client = http_client or httpx.Client()
         self._owns_client = http_client is None
+        self._journal = Journal(f"{base}/v1/traces", key, journal, VERSION)
+        self._release_http: Callable[[], None] | None = None
 
     def decide(
         self,
@@ -62,22 +120,50 @@ class Paidwen:
         context: ActionContext | None = None,
         action_id: str | None = None,
     ) -> Decision:
-        request: DecisionRequest = {"action_id": action_id or str(uuid.uuid4()), "tool": tool}
+        request = self._request(tool, params, cost, context, action_id, None)
+        return self._send(request, None)
+
+    def _request(
+        self,
+        tool: Tool,
+        params: Mapping[str, Any] | None,
+        cost: Cost | None,
+        context: ActionContext | None,
+        action_id: str | None,
+        span: Span | None,
+    ) -> DecisionRequest:
+        request: DecisionRequest = {
+            "action_id": action_id or _context.take_action_id() or str(uuid.uuid4()),
+            "tool": tool,
+        }
         if params is not None:
             request["params"] = dict(params)
         if cost is not None:
             request["cost"] = cost
-        if context is not None:
-            request["context"] = context
+        known: dict[str, Any] = {}
+        session = _context.scope().session_id
+        if session is not None:
+            known["session_id"] = session
+        if span is not None:
+            known["trace_id"] = trace_id(span)
+        if known or context is not None:
+            request["context"] = cast(ActionContext, {**known, **(context or {})})
+        return request
+
+    def _send(self, request: DecisionRequest, span: Span | None) -> Decision:
+        self._journal.settle()
+        headers = {"authorization": f"Bearer {self._api_key}", "accept": "application/json"}
+        if span is not None:
+            headers["traceparent"] = traceparent(span)
         try:
-            response = self._client.post(
-                self._endpoint,
-                json=request,
-                headers={
-                    "authorization": f"Bearer {self._api_key}",
-                    "accept": "application/json",
-                },
-                timeout=self._timeout,
+            response = quiet_call(
+                functools.partial(
+                    self._client.post,
+                    f"{self._base}/v1/decisions",
+                    json=request,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
             )
         except httpx.HTTPError as error:
             return self._fallback(request, error)
@@ -96,33 +182,252 @@ class Paidwen:
             raise RequestError(response.status_code, problem)
         return cast(Decision, body)
 
+    def _poll(self, approval_id: str) -> tuple[str, ApprovalStatus | None]:
+        try:
+            response = quiet_call(
+                functools.partial(
+                    self._client.get,
+                    f"{self._base}/v1/approvals/{approval_id}",
+                    headers={
+                        "authorization": f"Bearer {self._api_key}",
+                        "accept": "application/json",
+                    },
+                    timeout=self._timeout,
+                )
+            )
+        except httpx.HTTPError:
+            return "unavailable", None
+        if response.status_code == 429:
+            return "slow_down", None
+        if response.status_code >= 500:
+            return "unavailable", None
+        try:
+            body = response.json()
+        except ValueError:
+            return "unavailable", None
+        if not response.is_success:
+            problem = cast(Problem, body) if isinstance(body, dict) else None
+            raise RequestError(response.status_code, problem)
+        return "status", cast(ApprovalStatus, body)
+
+    def _deadline(self, decision: Decision) -> tuple[dict[str, Any], datetime]:
+        approval = decision.get("approval")
+        if approval is None:
+            raise PaidwenError("The decision carries no approval to wait for.")
+        deadline = _decided_at(decision) + timedelta(
+            seconds=approval["expires_in"] + WAIT_GRACE_SECONDS
+        )
+        return cast(dict[str, Any], approval), deadline
+
+    def _expired(
+        self,
+        decision: Decision,
+        approval: dict[str, Any],
+        deadline: datetime,
+        interval: int,
+        last: ApprovalStatus | None,
+    ) -> ApprovalStatus:
+        on_expiry = (last or {}).get("on_expiry") or approval.get("on_expiry") or "deny"
+        return {
+            "id": approval["id"],
+            "action_id": decision["action_id"],
+            "status": "expired",
+            "expires_at": deadline.isoformat(),
+            "interval": interval,
+            "on_expiry": on_expiry,
+        }
+
+    def wait_for_approval(self, decision: Decision) -> ApprovalStatus:
+        return self._wait(decision, lambda: None)
+
+    def _wait(self, decision: Decision, pending: Callable[[], None]) -> ApprovalStatus:
+        approval, deadline = self._deadline(decision)
+        interval = int(approval["interval"])
+        last: ApprovalStatus | None = None
+        first = True
+        while True:
+            if not first:
+                time.sleep(interval)
+            kind, status = self._poll(approval["id"])
+            if kind == "status" and status is not None:
+                last = status
+                if status["status"] != "pending":
+                    return status
+                interval = max(interval, status["interval"])
+            elif kind == "slow_down":
+                interval += SLOW_DOWN_SECONDS
+            if datetime.now(timezone.utc) >= deadline:
+                return self._expired(decision, approval, deadline, interval, last)
+            if first:
+                first = False
+                pending()
+
+    async def _wait_async(
+        self, decision: Decision, pending: Callable[[], Awaitable[None]]
+    ) -> ApprovalStatus:
+        approval, deadline = self._deadline(decision)
+        interval = int(approval["interval"])
+        last: ApprovalStatus | None = None
+        first = True
+        while True:
+            if not first:
+                await anyio.sleep(interval)
+            kind, status = await anyio.to_thread.run_sync(self._poll, approval["id"])
+            if kind == "status" and status is not None:
+                last = status
+                if status["status"] != "pending":
+                    return status
+                interval = max(interval, status["interval"])
+            elif kind == "slow_down":
+                interval += SLOW_DOWN_SECONDS
+            if datetime.now(timezone.utc) >= deadline:
+                return self._expired(decision, approval, deadline, interval, last)
+            if first:
+                first = False
+                await pending()
+
+    def _wait_of(self, decision: Decision) -> Wait:
+        approval = decision["approval"]
+        return Wait(
+            decision=decision,
+            approval_id=approval["id"],
+            expires_at=_decided_at(decision) + timedelta(seconds=approval["expires_in"]),
+            interval=approval["interval"],
+            on_expiry=approval.get("on_expiry", "deny"),
+        )
+
+    def _verdict(self, decision: Decision, span: Span) -> bool:
+        span.set_attribute("paidwen.action.id", decision["action_id"])
+        verdict = decision["verdict"]
+        if verdict == "allow":
+            return True
+        if verdict in ("block", "quarantine"):
+            raise DeniedError(decision)
+        if decision.get("approval") is None:
+            raise PendingError(decision)
+        return False
+
+    def _authorize(self, tool: Tool, params: Mapping[str, Any] | None, span: Span) -> None:
+        decision = self._send(self._request(tool, params, None, None, None, span), span)
+        if self._verdict(decision, span):
+            return
+
+        def pending() -> None:
+            if self._on_pending == "raise":
+                raise PendingError(decision)
+            if self._on_wait is not None:
+                notice = self._on_wait(self._wait_of(decision))
+                if inspect.isawaitable(notice):
+                    cast(Any, notice).close()
+                    raise PaidwenError("on_wait returned a coroutine in a synchronous call.")
+
+        status = self._wait(decision, pending)
+        if not _runs(status):
+            raise DeniedError(decision, status)
+
+    async def _authorize_async(
+        self, tool: Tool, params: Mapping[str, Any] | None, span: Span
+    ) -> None:
+        request = self._request(tool, params, None, None, None, span)
+        decision = await anyio.to_thread.run_sync(self._send, request, span)
+        if self._verdict(decision, span):
+            return
+
+        async def pending() -> None:
+            if self._on_pending == "raise":
+                raise PendingError(decision)
+            if self._on_wait is not None:
+                notice = self._on_wait(self._wait_of(decision))
+                if inspect.isawaitable(notice):
+                    await notice
+
+        status = await self._wait_async(decision, pending)
+        if not _runs(status):
+            raise DeniedError(decision, status)
+
+    def _close(self, span: Span, result: Any, status_of: Callable[[Any], int] | None) -> None:
+        if status_of is None:
+            finish(span)
+            return
+        code = status_of(result)
+        span.set_attribute("http.response.status_code", code)
+        finish(span, _HttpStatusError(str(code)) if code >= 400 else None)
+
+    def _run(
+        self,
+        tool: Tool,
+        params: Mapping[str, Any] | None,
+        action: Callable[[], R],
+        status_of: Callable[[Any], int] | None = None,
+    ) -> R:
+        span = self._journal.start_tool(tool["name"], _attributes(tool))
+        try:
+            self._authorize(tool, params, span)
+            started(span)
+            with _context.inside_action():
+                result = action()
+        except BaseException as error:
+            finish(span, error)
+            raise
+        self._close(span, result, status_of)
+        return result
+
+    async def _run_async(
+        self,
+        tool: Tool,
+        params: Mapping[str, Any] | None,
+        action: Callable[[], Awaitable[R]],
+        status_of: Callable[[Any], int] | None = None,
+    ) -> R:
+        span = self._journal.start_tool(tool["name"], _attributes(tool))
+        try:
+            await self._authorize_async(tool, params, span)
+            started(span)
+            with _context.inside_action():
+                result = await action()
+        except BaseException as error:
+            finish(span, error)
+            raise
+        self._close(span, result, status_of)
+        return result
+
+    def skips(self, server: str, ignore: Sequence[str]) -> bool:
+        from ._http import ignored
+
+        current = _context.scope()
+        if current.silenced or current.in_action:
+            return True
+        if otel_context.get_value(_SUPPRESS_INSTRUMENTATION_KEY):
+            return True
+        return ignored(ignore, server)
+
     def tool(self, name: str) -> Callable[[F], F]:
         def decorate(function: F) -> F:
             signature = inspect.signature(function)
-
-            def ask(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Decision:
-                return self.decide(
-                    tool={"name": name, "kind": "function"},
-                    params=_params(signature, args, kwargs),
-                )
+            tool: Tool = {"name": name, "kind": "function"}
 
             if inspect.iscoroutinefunction(function):
 
                 @functools.wraps(function)
                 async def run_async(*args: Any, **kwargs: Any) -> Any:
-                    _enforce(await anyio.to_thread.run_sync(functools.partial(ask, args, kwargs)))
-                    return await function(*args, **kwargs)
+                    params = _params(signature, args, kwargs)
+                    return await self._run_async(tool, params, lambda: function(*args, **kwargs))
 
                 return cast(F, run_async)
 
             @functools.wraps(function)
             def run(*args: Any, **kwargs: Any) -> Any:
-                _enforce(ask(args, kwargs))
-                return function(*args, **kwargs)
+                params = _params(signature, args, kwargs)
+                return self._run(tool, params, lambda: function(*args, **kwargs))
 
             return cast(F, run)
 
         return decorate
+
+    def context(
+        self, action_id: str | None = None, session_id: str | None = None
+    ) -> AbstractContextManager[None]:
+        return _context.context(action_id=action_id, session_id=session_id)
 
     def mcp(self, target: Any) -> Callable[[], None]:
         send = getattr(target, "send_request", None)
@@ -133,20 +438,24 @@ class Paidwen:
         if getattr(target, _CAPTURED, False):
             raise PaidwenError("This MCP session is already captured by Paidwen.")
         own = vars(target).get("send_request")
-        ask = self._ask_mcp
+        run = self._run_async
 
         if isinstance(target, type):
 
             async def send_class(session: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
-                await ask(session, request)
-                return await send(session, request, *args, **kwargs)
+                call = _tool_call(session, request)
+                if call is None:
+                    return await send(session, request, *args, **kwargs)
+                return await run(call[0], call[1], lambda: send(session, request, *args, **kwargs))
 
             wrapped = functools.wraps(send)(send_class)
         else:
 
             async def send_session(request: Any, *args: Any, **kwargs: Any) -> Any:
-                await ask(target, request)
-                return await send(request, *args, **kwargs)
+                call = _tool_call(target, request)
+                if call is None:
+                    return await send(request, *args, **kwargs)
+                return await run(call[0], call[1], lambda: send(request, *args, **kwargs))
 
             wrapped = functools.wraps(send)(send_session)
         target.send_request = wrapped
@@ -161,17 +470,30 @@ class Paidwen:
 
         return release
 
-    async def _ask_mcp(self, session: Any, request: Any) -> None:
-        call = _tool_call(session, request)
-        if call is None:
-            return
-        tool, params = call
-        decision = await anyio.to_thread.run_sync(
-            functools.partial(self.decide, tool=tool, params=params)
-        )
-        _enforce(decision)
+    def http(self, ignore: Sequence[str] = ()) -> Callable[[], None]:
+        from ._capture import install
+
+        if self._release_http is not None:
+            raise PaidwenError("The HTTP calls of this process are already captured by Paidwen.")
+        release = install(self, tuple(ignore))
+
+        def undo() -> None:
+            release()
+            self._release_http = None
+
+        self._release_http = undo
+        return undo
+
+    def span_processor(self) -> SpanProcessor:
+        return self._journal.processor()
+
+    def flush(self) -> None:
+        self._journal.flush()
 
     def close(self) -> None:
+        if self._release_http is not None:
+            self._release_http()
+        self._journal.shutdown()
         if self._owns_client:
             self._client.close()
 
@@ -199,6 +521,14 @@ class Paidwen:
             "observed": [],
             "decided_at": datetime.now(timezone.utc).isoformat(),
         }
+
+
+def _attributes(tool: Tool) -> dict[str, Any]:
+    attributes: dict[str, Any] = {"paidwen.tool.kind": tool["kind"]}
+    server = tool.get("server")
+    if server is not None:
+        attributes["paidwen.tool.server"] = server
+    return attributes
 
 
 def _params(
@@ -232,10 +562,3 @@ def _tool_call(session: Any, request: Any) -> tuple[Tool, dict[str, Any]] | None
     if isinstance(server, str) and 1 <= len(server) <= 256:
         tool["server"] = server
     return tool, dict(arguments) if isinstance(arguments, Mapping) else {}
-
-
-def _enforce(decision: Decision) -> None:
-    if decision["verdict"] in ("block", "quarantine"):
-        raise DeniedError(decision)
-    if decision["verdict"] in ("require_approval", "escalate"):
-        raise PendingError(decision)

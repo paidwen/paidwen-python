@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import json
+import threading
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+from urllib.parse import urlsplit
+
+import aiohttp
+import anyio
+import httpx
+import pytest
+import requests
+import urllib3
+from fake import FakePaidwen, decision, serve
+
+from paidwen import DeniedError, Paidwen, PaidwenError
+
+
+@dataclass
+class Api:
+    url: str = ""
+    received: list[tuple[str, str, bytes]] = field(default_factory=list)
+
+    @property
+    def host(self) -> str:
+        return urlsplit(self.url).netloc
+
+
+@pytest.fixture
+def api() -> Iterator[Api]:
+    state = Api()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args: Any) -> None:
+            return
+
+        def _answer(self) -> None:
+            length = int(self.headers.get("content-length") or 0)
+            body = self.rfile.read(length) if length else b""
+            state.received.append((self.command, self.path, body))
+            data = b'{"refund":"re_1"}'
+            self.send_response(404 if self.path.startswith("/missing") else 200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        do_GET = _answer
+        do_POST = _answer
+        do_DELETE = _answer
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state.url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture
+def fake() -> Iterator[FakePaidwen]:
+    with serve() as server:
+        yield server
+
+
+@pytest.fixture
+def capture(fake: FakePaidwen) -> Iterator[Callable[..., Paidwen]]:
+    opened: list[Paidwen] = []
+
+    def open_capture(ignore: tuple[str, ...] = (), journal: bool = False) -> Paidwen:
+        paidwen = Paidwen("pw_test_key", base_url=fake.url, journal=journal)
+        paidwen.http(ignore=ignore)
+        opened.append(paidwen)
+        return paidwen
+
+    yield open_capture
+    for paidwen in opened:
+        paidwen.close()
+
+
+def asked(fake: FakePaidwen) -> list[dict[str, Any]]:
+    return [recorded.body for recorded in fake.decisions]
+
+
+def test_httpx_asks_before_the_call_and_reads_it_as_a_tool(
+    api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
+) -> None:
+    capture()
+    response = httpx.post(
+        f"{api.url}/v1/refunds?expand=charge&sig=abc&tag=a&tag=b",
+        headers={"authorization": "Bearer sk_live_secret"},
+        json={
+            "amount": 2500,
+            "charge": "ch_1",
+            "api_key": "sk_live_secret",
+            "nested": {"client_secret": "x"},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"refund": "re_1"}
+    assert len(api.received) == 1
+    [question] = asked(fake)
+    assert question["tool"] == {"name": "POST /v1/refunds", "kind": "http", "server": api.host}
+    assert question["params"] == {
+        "method": "POST",
+        "url": f"{api.url}/v1/refunds",
+        "query": {"expand": "charge", "sig": "REDACTED", "tag": ["a", "b"]},
+        "body": {
+            "amount": 2500,
+            "charge": "ch_1",
+            "api_key": "REDACTED",
+            "nested": {"client_secret": "REDACTED"},
+        },
+    }
+    assert "sk_live_secret" not in json.dumps(question)
+
+
+def test_a_refused_httpx_call_is_never_sent(
+    api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
+) -> None:
+    fake.answer = lambda request: decision(request, "block", rule_id="no-refunds")
+    capture()
+    with pytest.raises(DeniedError, match="no-refunds"):
+        httpx.post(f"{api.url}/v1/refunds")
+    assert api.received == []
+
+
+def test_an_async_httpx_call_asks_too(
+    api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
+) -> None:
+    capture()
+
+    async def call() -> int:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{api.url}/v1/customers/42")
+            return response.status_code
+
+    assert anyio.run(call) == 200
+    assert [question["tool"]["name"] for question in asked(fake)] == ["GET /v1/customers/42"]
+
+
+def test_requests_and_urllib3_ask_and_a_refusal_raises_the_error_of_the_sdk(
+    api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
+) -> None:
+    fake.answer = lambda request: decision(
+        request, "block" if request["tool"]["name"].startswith("DELETE") else "allow"
+    )
+    capture()
+    response = requests.post(
+        f"{api.url}/v1/refunds", data={"amount": "2500", "password": "hunter2"}
+    )
+    assert response.status_code == 200
+    with pytest.raises(DeniedError):
+        requests.delete(f"{api.url}/v1/customers/42")
+    with pytest.raises(DeniedError):
+        urllib3.request("DELETE", f"{api.url}/v1/customers/43")
+    assert urllib3.request("GET", f"{api.url}/v1/customers/44").status == 200
+    form, first, second, read = asked(fake)
+    assert form["params"]["body"] == {"amount": "2500", "password": "REDACTED"}
+    assert form["tool"]["server"] == api.host
+    assert first["tool"]["name"] == "DELETE /v1/customers/42"
+    assert second["tool"]["name"] == "DELETE /v1/customers/43"
+    assert read["params"]["url"] == f"{api.url}/v1/customers/44"
+    assert [call[0] for call in api.received] == ["POST", "GET"]
+
+
+def test_aiohttp_asks_before_the_call(
+    api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
+) -> None:
+    capture()
+
+    async def call() -> dict[str, Any]:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
+                f"{api.url}/v1/refunds",
+                params={"expand": "charge"},
+                json={"amount": 2500, "token": "tok_1"},
+            ) as response,
+        ):
+            return await response.json()
+
+    assert anyio.run(call) == {"refund": "re_1"}
+    [question] = asked(fake)
+    assert question["tool"] == {"name": "POST /v1/refunds", "kind": "http", "server": api.host}
+    assert question["params"]["query"] == {"expand": "charge"}
+    assert question["params"]["body"] == {"amount": 2500, "token": "REDACTED"}
+
+
+def test_an_unknown_or_large_body_stays_unread(
+    api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
+) -> None:
+    capture()
+    httpx.post(f"{api.url}/v1/files", content=b"binary", headers={"content-type": "image/png"})
+    httpx.post(f"{api.url}/v1/large", json={"blob": "a" * 70_000})
+    binary, large = asked(fake)
+    assert "body" not in binary["params"]
+    assert "body" not in large["params"]
+
+
+def test_nothing_is_asked_inside_an_action_for_ignored_hosts_and_after_the_release(
+    api: Api, fake: FakePaidwen
+) -> None:
+    paidwen = Paidwen("pw_test_key", base_url=fake.url, journal=False)
+    release = paidwen.http(ignore=["*.example.test", "localhost"])
+
+    @paidwen.tool("search")
+    def search() -> int:
+        return httpx.get(f"{api.url}/v1/inside").status_code
+
+    assert search() == 200
+    assert len(fake.decisions) == 1, "the nested call inside the action asks nothing"
+    release()
+    httpx.get(f"{api.url}/v1/after")
+    assert len(fake.decisions) == 1, "the released capture asks nothing"
+    assert [call[1] for call in api.received] == ["/v1/inside", "/v1/after"]
+    second = Paidwen("pw_test_key", base_url=fake.url, journal=False)
+    second.http(ignore=["127.0.0.*"])
+    httpx.get(f"{api.url}/v1/ignored")
+    assert len(fake.decisions) == 1, "the ignored host asks nothing"
+    second.close()
+    paidwen.close()
+
+
+def test_each_captured_call_reaches_the_journal_with_its_status(
+    api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
+) -> None:
+    paidwen = capture(journal=True)
+    httpx.get(f"{api.url}/missing/thing")
+    requests.get(f"{api.url}/missing/other")
+    paidwen.flush()
+    spans = fake.spans()
+    assert len(spans) == 2, "the export of the journal is not captured"
+    assert [span.name for span in spans] == [
+        "execute_tool GET /missing/thing",
+        "execute_tool GET /missing/other",
+    ]
+    assert spans[0].attributes["paidwen.tool.kind"] == "http"
+    assert spans[0].attributes["paidwen.tool.server"] == api.host
+    assert spans[0].attributes["http.response.status_code"] == 404
+    assert spans[0].status == 2
+    assert len(fake.decisions) == 2
+
+
+def test_a_second_capture_is_refused(capture: Callable[..., Paidwen]) -> None:
+    paidwen = capture()
+    with pytest.raises(PaidwenError, match="already captured"):
+        paidwen.http()
+    other = Paidwen("pw_test_key", base_url="http://127.0.0.1:9", journal=False)
+    with pytest.raises(PaidwenError, match="already captured"):
+        other.http()
+    other.close()

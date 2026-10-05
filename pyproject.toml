@@ -1,6 +1,6 @@
 [project]
 name = "paidwen"
-version = "0.6.0"
+version = "0.7.0"
 description = "Paidwen SDK: the agent asks Paidwen before each action and applies the answer."
 readme = "README.md"
 license = "Apache-2.0"
@@ -9,6 +9,9 @@ requires-python = ">=3.10"
 dependencies = [
     "anyio>=4",
     "httpx>=0.27,<1",
+    "opentelemetry-api>=1.30,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
+    "opentelemetry-sdk>=1.30,<2",
     "typing-extensions>=4.12",
 ]
 classifiers = [
@@ -25,9 +28,12 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "aiohttp==3.14.3",
     "datamodel-code-generator==0.83.0",
     "mcp==2.3.0",
+    "opentelemetry-proto>=1.30,<2",
     "pytest==9.1.1",
+    "requests==2.34.2",
     "ruff==0.16.10",
 ]
 

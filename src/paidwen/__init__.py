@@ -1,7 +1,9 @@
-from ._client import Fallback, Paidwen
+from ._client import Fallback, OnPending, Paidwen, Wait
 from ._contract import (
     ActionContext,
     Approval,
+    ApprovalStatus,
+    BudgetOutcome,
     Cost,
     Decision,
     DecisionRequest,
@@ -15,12 +17,15 @@ from ._errors import DeniedError, PaidwenError, PendingError, RequestError
 __all__ = [
     "ActionContext",
     "Approval",
+    "ApprovalStatus",
+    "BudgetOutcome",
     "Cost",
     "Decision",
     "DecisionRequest",
     "DeniedError",
     "Fallback",
     "ObservedRule",
+    "OnPending",
     "Paidwen",
     "PaidwenError",
     "PendingError",
@@ -28,4 +33,5 @@ __all__ = [
     "Problem",
     "RequestError",
     "Tool",
+    "Wait",
 ]

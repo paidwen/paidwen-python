@@ -59,6 +59,7 @@ def client(handler: Handler, **options: Any) -> Paidwen:
         "pw_test_key",
         base_url="https://api.example.test/",
         http_client=httpx.Client(transport=transport),
+        journal=False,
         **options,
     )
 
@@ -132,7 +133,9 @@ def test_decide_gives_up_on_a_silent_server() -> None:
         listener.listen()
         port = listener.getsockname()[1]
         started = time.monotonic()
-        with Paidwen("pw_test_key", base_url=f"http://127.0.0.1:{port}", timeout=0.2) as paidwen:
+        with Paidwen(
+            "pw_test_key", base_url=f"http://127.0.0.1:{port}", timeout=0.2, journal=False
+        ) as paidwen:
             result = paidwen.decide(tool={"name": "x", "kind": "function"})
         elapsed = time.monotonic() - started
     assert result["verdict"] == "block"
@@ -252,7 +255,7 @@ def test_the_constructor_reads_the_environment(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("PAIDWEN_BASE_URL", raising=False)
     requests: list[httpx.Request] = []
     transport = httpx.MockTransport(server(200, decision("allow"), requests))
-    with Paidwen(http_client=httpx.Client(transport=transport)) as paidwen:
+    with Paidwen(http_client=httpx.Client(transport=transport), journal=False) as paidwen:
         paidwen.decide(tool={"name": "x", "kind": "function"})
     assert str(requests[0].url) == "https://api.paidwen.com/v1/decisions"
     assert requests[0].headers["authorization"] == "Bearer pw_test_from_env"

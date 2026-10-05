@@ -42,6 +42,7 @@ def answering(verdict: str, asked: list[dict[str, Any]]) -> Paidwen:
         "pw_test_key",
         base_url="https://api.example.test",
         http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+        journal=False,
     )
 
 

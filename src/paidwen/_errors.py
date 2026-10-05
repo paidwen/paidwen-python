@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._contract import Decision, Problem
+from ._contract import ApprovalStatus, Decision, Problem
 
 
 class PaidwenError(Exception):
@@ -10,14 +10,15 @@ class PaidwenError(Exception):
 
 
 class DeniedError(PaidwenError):
-    def __init__(self, decision: Decision) -> None:
-        super().__init__(_describe(decision))
+    def __init__(self, decision: Decision, approval: ApprovalStatus | None = None) -> None:
+        super().__init__(_describe(decision, approval))
         self.decision = decision
+        self.approval = approval
 
 
 class PendingError(PaidwenError):
     def __init__(self, decision: Decision) -> None:
-        super().__init__(_describe(decision))
+        super().__init__(_describe(decision, None))
         self.decision = decision
 
 
@@ -33,10 +34,17 @@ class RequestError(PaidwenError):
         self.problem = problem
 
 
-def _describe(decision: Decision) -> str:
+def _describe(decision: Decision, approval: ApprovalStatus | None) -> str:
     answer = f"Paidwen answered {decision['verdict']} for action {decision['action_id']}"
+    if approval is not None and approval["status"] == "denied":
+        return f"{answer}, and the approver denied it."
+    if approval is not None and approval["status"] == "expired":
+        return f"{answer}, and the wait expired without an answer."
     if decision["rule_id"] is not None:
         return f"{answer} by rule {decision['rule_id']}."
+    budget = decision.get("budget")
+    if budget is not None:
+        return f"{answer} because the {budget['exceeded']} budget of the agent is spent."
     permission = decision.get("permission")
     if permission is not None and not permission["allowed"]:
         return f"{answer} because the permissions of the agent do not allow it."
