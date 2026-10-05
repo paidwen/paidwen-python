@@ -58,11 +58,22 @@ class Approval(TypedDict):
     interval: int
 
 
+class PermissionOutcome(TypedDict):
+    """
+    How the permissions of the agent answered. When allowed is false, the permissions count as block. The tool and server patterns name the entry that decided; they are absent when no entry lists the tool.
+    """
+
+    allowed: bool
+    tool: NotRequired[str]
+    server: NotRequired[str]
+
+
 class Decision(TypedDict):
     action_id: str
     verdict: Verdict
     rule_id: str | None
     observed: list[ObservedRule]
+    permission: NotRequired[PermissionOutcome]
     approval: NotRequired[Approval]
     decided_at: str
 
@@ -85,6 +96,9 @@ Environment: TypeAlias = Literal["production", "test"]
 RiskLevel: TypeAlias = Literal["low", "medium", "high", "critical"]
 
 
+Labels: TypeAlias = dict[str, str]
+
+
 class Agent(TypedDict, closed=True):
     id: str
     name: str
@@ -94,7 +108,67 @@ class Agent(TypedDict, closed=True):
     model_provider: NotRequired[str]
     environment: Environment
     risk_level: NotRequired[RiskLevel]
-    labels: NotRequired[dict[str, str]]
+    labels: Labels
+    created_at: str
+    updated_at: str
+
+
+class AgentCreate(TypedDict, closed=True):
+    name: str
+    owner: NotRequired[str]
+    team: NotRequired[str]
+    description: NotRequired[str]
+    model_provider: NotRequired[str]
+    environment: Environment
+    risk_level: NotRequired[RiskLevel]
+    labels: NotRequired[Labels]
+
+
+class AgentPatch(TypedDict, closed=True):
+    name: NotRequired[str]
+    owner: NotRequired[str | None]
+    team: NotRequired[str | None]
+    description: NotRequired[str | None]
+    model_provider: NotRequired[str | None]
+    risk_level: NotRequired[Literal["low", "medium", "high", "critical"] | None]
+    labels: NotRequired[dict[str, str | None] | None]
+
+
+class AgentList(TypedDict):
+    data: list[Agent]
+    has_more: bool
+
+
+class AgentKey(TypedDict):
+    id: str
+    agent_id: str
+    redacted: str
+    created_at: str
+    revoked_at: str | None
+
+
+class CreatedAgentKey(TypedDict):
+    id: str
+    agent_id: str
+    redacted: str
+    created_at: str
+    revoked_at: str | None
+    secret: str
+
+
+class AgentKeyList(TypedDict):
+    data: list[AgentKey]
+    has_more: bool
+
+
+class PermissionEntry(TypedDict, closed=True):
+    tool: str
+    server: NotRequired[str]
+
+
+class AgentPermissions(TypedDict, closed=True):
+    allow: list[PermissionEntry]
+    deny: list[PermissionEntry]
 
 
 RuleMode: TypeAlias = Literal["active", "observe"]
@@ -106,27 +180,72 @@ class Rule(TypedDict, closed=True):
     condition: str
     verdict: Verdict
     mode: RuleMode
+    created_at: str
+    updated_at: str
 
 
-class AgentKeyDigest(TypedDict, closed=True):
-    agent_id: str
-    sha256: str
+class RuleCreate(TypedDict, closed=True):
+    name: NotRequired[str]
+    condition: str
+    verdict: Verdict
+    mode: RuleMode
 
 
-class SnapshotOrganization(TypedDict, closed=True):
+class RulePatch(TypedDict, closed=True):
+    name: NotRequired[str | None]
+    condition: NotRequired[str]
+    verdict: NotRequired[Verdict]
+    mode: NotRequired[RuleMode]
+
+
+class RuleList(TypedDict):
+    data: list[Rule]
+    has_more: bool
+
+
+KeyDigest: TypeAlias = str
+
+
+class SnapshotAgent(TypedDict, closed=True):
     id: str
-    agents: list[Agent]
-    keys: list[AgentKeyDigest]
-    rules: list[Rule]
+    name: str
+    owner: NotRequired[str]
+    team: NotRequired[str]
+    environment: Environment
+    risk_level: NotRequired[RiskLevel]
+    labels: NotRequired[Labels]
+    key_digests: list[KeyDigest]
+    permissions: NotRequired[AgentPermissions]
+
+
+class SnapshotRule(TypedDict, closed=True):
+    id: str
+    condition: str
+    verdict: Verdict
+    mode: RuleMode
 
 
 class Snapshot(TypedDict, closed=True):
     """
-    Everything the decision point needs to answer, held in memory: the organizations, their agents with the digests of their keys, and their rules.
+    Everything the decision point needs to answer for one organization, held in memory: its revision, its agents with the digests of their active keys and their permissions, and its rules in the order of the organization.
     """
 
-    revision: str
-    organizations: list[SnapshotOrganization]
+    organization_id: str
+    revision: int
+    agents: list[SnapshotAgent]
+    rules: list[SnapshotRule]
+
+
+class ConformanceRule(TypedDict, closed=True):
+    """
+    A rule of a conformance case. Its identifier is local to the case.
+    """
+
+    id: str
+    name: NotRequired[str]
+    condition: str
+    verdict: Verdict
+    mode: RuleMode
 
 
 class ConformanceExpectation(TypedDict, closed=True):
@@ -134,16 +253,18 @@ class ConformanceExpectation(TypedDict, closed=True):
     rule_id: str | None
     observed: list[ObservedRule]
     awaits_approval: bool
+    permission: NotRequired[PermissionOutcome]
 
 
 class ConformanceCase(TypedDict, closed=True):
     """
-    One example of the conformance suite: an agent, the rules of its organization, a request and the expected decision. The server and both SDKs must pass every case.
+    One example of the conformance suite: an agent, its permissions, the rules of its organization, a request and the expected decision. The server and both SDKs must pass every case.
     """
 
     name: str
     description: str
-    agent: Agent
-    rules: list[Rule]
+    agent: AgentCreate
+    permissions: NotRequired[AgentPermissions]
+    rules: list[ConformanceRule]
     request: DecisionRequest
     expected: ConformanceExpectation
