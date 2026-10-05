@@ -102,7 +102,9 @@ async def loop(parallel: int) -> None:
     paidwen.close()
 
 
-def http_calls(target: str, calls: int, warmup: int) -> None:
+def http_calls(target: str, calls: int, warmup: int, captured: bool) -> None:
+    paidwen = Paidwen() if captured else None
+    release = paidwen.http() if paidwen else None
     body = {"amount": 2500, "currency": "usd", "order": "ord_4821"}
     client = httpx.Client()
 
@@ -115,15 +117,12 @@ def http_calls(target: str, calls: int, warmup: int) -> None:
         return durations
 
     series(warmup)
-    plain = series(calls)
-    paidwen = Paidwen()
-    release = paidwen.http()
-    series(warmup)
-    captured = series(calls)
-    release()
-    paidwen.close()
+    durations = series(calls)
     client.close()
-    emit({"event": "measured", "plain": plain, "captured": captured})
+    if release is not None and paidwen is not None:
+        release()
+        paidwen.close()
+    emit({"event": "measured", "durations": durations})
 
 
 def main(arguments: list[str]) -> None:
@@ -133,10 +132,13 @@ def main(arguments: list[str]) -> None:
     elif mode == "loop":
         asyncio.run(loop(int(arguments[1]) if len(arguments) > 1 else 1))
     elif mode == "http" and len(arguments) > 1:
-        http_calls(arguments[1], int(arguments[2]) if len(arguments) > 2 else 1000, 100)
+        calls = int(arguments[2]) if len(arguments) > 2 else 1000
+        captured = len(arguments) > 3 and arguments[3] == "captured"
+        http_calls(arguments[1], calls, 100, captured)
     else:
         raise SystemExit(
-            "usage: python proof/agent.py refund | loop [parallel] | http <url> [calls]"
+            "usage: python proof/agent.py refund | loop [parallel]"
+            " | http <url> [calls] [plain|captured]"
         )
 
 
