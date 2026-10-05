@@ -307,8 +307,10 @@ class Paidwen:
             raise PendingError(decision)
         return False
 
-    def _authorize(self, tool: Tool, params: Mapping[str, Any] | None, span: Span) -> None:
-        decision = self._send(self._request(tool, params, None, None, None, span), span)
+    def _authorize(
+        self, tool: Tool, params: Mapping[str, Any] | None, cost: Cost | None, span: Span
+    ) -> None:
+        decision = self._send(self._request(tool, params, cost, None, None, span), span)
         if self._verdict(decision, span):
             return
 
@@ -326,9 +328,9 @@ class Paidwen:
             raise DeniedError(decision, status)
 
     async def _authorize_async(
-        self, tool: Tool, params: Mapping[str, Any] | None, span: Span
+        self, tool: Tool, params: Mapping[str, Any] | None, cost: Cost | None, span: Span
     ) -> None:
-        request = self._request(tool, params, None, None, None, span)
+        request = self._request(tool, params, cost, None, None, span)
         decision = await anyio.to_thread.run_sync(self._send, request, span)
         if self._verdict(decision, span):
             return
@@ -359,10 +361,11 @@ class Paidwen:
         params: Mapping[str, Any] | None,
         action: Callable[[], R],
         status_of: Callable[[Any], int] | None = None,
+        cost: Cost | None = None,
     ) -> R:
         span = self._journal.start_tool(tool["name"], _attributes(tool))
         try:
-            self._authorize(tool, params, span)
+            self._authorize(tool, params, cost, span)
             started(span)
             with _context.inside_action():
                 result = action()
@@ -378,10 +381,11 @@ class Paidwen:
         params: Mapping[str, Any] | None,
         action: Callable[[], Awaitable[R]],
         status_of: Callable[[Any], int] | None = None,
+        cost: Cost | None = None,
     ) -> R:
         span = self._journal.start_tool(tool["name"], _attributes(tool))
         try:
-            await self._authorize_async(tool, params, span)
+            await self._authorize_async(tool, params, cost, span)
             started(span)
             with _context.inside_action():
                 result = await action()
@@ -401,7 +405,15 @@ class Paidwen:
             return True
         return ignored(ignore, server)
 
-    def tool(self, name: str) -> Callable[[F], F]:
+    def tool(
+        self,
+        name: str,
+        *,
+        cost: Cost | Callable[[dict[str, Any]], Cost | None] | None = None,
+    ) -> Callable[[F], F]:
+        def estimate(params: dict[str, Any]) -> Cost | None:
+            return cost(params) if callable(cost) else cost
+
         def decorate(function: F) -> F:
             signature = inspect.signature(function)
             tool: Tool = {"name": name, "kind": "function"}
@@ -411,14 +423,21 @@ class Paidwen:
                 @functools.wraps(function)
                 async def run_async(*args: Any, **kwargs: Any) -> Any:
                     params = _params(signature, args, kwargs)
-                    return await self._run_async(tool, params, lambda: function(*args, **kwargs))
+                    return await self._run_async(
+                        tool,
+                        params,
+                        lambda: function(*args, **kwargs),
+                        cost=estimate(params),
+                    )
 
                 return cast(F, run_async)
 
             @functools.wraps(function)
             def run(*args: Any, **kwargs: Any) -> Any:
                 params = _params(signature, args, kwargs)
-                return self._run(tool, params, lambda: function(*args, **kwargs))
+                return self._run(
+                    tool, params, lambda: function(*args, **kwargs), cost=estimate(params)
+                )
 
             return cast(F, run)
 

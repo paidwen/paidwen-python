@@ -15,6 +15,19 @@ def refund(order: str, amount: float) -> None:
 
 `Paidwen()` reads the agent key from `PAIDWEN_API_KEY`. A call to `refund` asks Paidwen first. It runs when Paidwen allows it, waits when the action needs a human approval, and raises `DeniedError` when Paidwen blocks it or puts the agent in quarantine. When the permissions or the budget of the agent refuse the action, the message of `DeniedError` says so. An async function works the same way.
 
+## Tool cost
+
+```python
+@paidwen.tool("search.web", cost={"estimated_usd": 0.001})
+def search(query: str) -> list[str]: ...
+
+
+@paidwen.tool("payments.refund", cost=lambda params: {"estimated_usd": 0.30})
+def refund(order: str, amount: float) -> None: ...
+```
+
+`cost` gives the cost that the agent estimates for the tool, fixed or computed from the parameters. The budget of the agent counts it, and the rules read it in `cost.estimated_usd`.
+
 ## Human approval
 
 ```python

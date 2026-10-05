@@ -176,6 +176,31 @@ def test_tool_runs_the_function_when_paidwen_allows_it() -> None:
     }
 
 
+def test_tool_sends_the_cost_that_the_agent_estimates() -> None:
+    requests: list[httpx.Request] = []
+    paidwen = client(server(200, decision("allow"), requests))
+
+    @paidwen.tool("search.web", cost={"estimated_usd": 0.001})
+    def search() -> str:
+        return "found"
+
+    @paidwen.tool("payments.refund", cost=lambda params: {"estimated_usd": params["amount"] / 1000})
+    async def refund(amount: int) -> int:
+        return amount
+
+    @paidwen.tool("free", cost=lambda params: None)
+    def free() -> str:
+        return "ok"
+
+    search()
+    asyncio.run(refund(250))
+    free()
+    sent = [json.loads(request.content) for request in requests]
+    assert sent[0]["cost"] == {"estimated_usd": 0.001}
+    assert sent[1]["cost"] == {"estimated_usd": 0.25}
+    assert "cost" not in sent[2]
+
+
 @pytest.mark.parametrize("verdict", ["block", "quarantine"])
 def test_tool_never_runs_the_function_when_paidwen_denies_it(verdict: str) -> None:
     calls: list[str] = []

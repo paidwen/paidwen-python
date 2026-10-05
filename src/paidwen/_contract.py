@@ -294,6 +294,16 @@ class AgentReference(TypedDict):
     name: str
 
 
+class AuditAgent(TypedDict):
+    """
+    The agent as the decision point knew it when it decided.
+    """
+
+    id: str
+    name: str
+    environment: NotRequired[Environment]
+
+
 class RuleReference(TypedDict):
     id: str
     name: NotRequired[str]
@@ -371,7 +381,7 @@ class AuditRecord(TypedDict):
     """
 
     action_id: str
-    agent: AgentReference
+    agent: AuditAgent
     tool: Tool
     params: NotRequired[dict[str, Any]]
     cost: NotRequired[Cost]
