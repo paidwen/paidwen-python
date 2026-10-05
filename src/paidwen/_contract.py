@@ -48,16 +48,6 @@ class ObservedRule(TypedDict):
     verdict: Verdict
 
 
-class Approval(TypedDict):
-    """
-    The wait for a human answer. The SDK polls for the answer every interval seconds, until the answer comes or the wait expires.
-    """
-
-    id: str
-    expires_in: int
-    interval: int
-
-
 class PermissionOutcome(TypedDict):
     """
     How the permissions of the agent answered. When allowed is false, the permissions count as block. The tool and server patterns name the entry that decided; they are absent when no entry lists the tool.
@@ -79,17 +69,6 @@ class BudgetOutcome(TypedDict):
     exceeded: BudgetWindow
     spent_usd: float
     limit_usd: float
-
-
-class Decision(TypedDict):
-    action_id: str
-    verdict: Verdict
-    rule_id: str | None
-    observed: list[ObservedRule]
-    permission: NotRequired[PermissionOutcome]
-    budget: NotRequired[BudgetOutcome]
-    approval: NotRequired[Approval]
-    decided_at: str
 
 
 ApprovalState: TypeAlias = Literal["pending", "approved", "denied", "expired"]
@@ -493,6 +472,28 @@ class ConformanceCase(TypedDict, closed=True):
     rules: list[ConformanceRule]
     request: DecisionRequest
     expected: ConformanceExpectation
+
+
+class Approval(TypedDict):
+    """
+    The wait for a human answer. The SDK polls for the answer every interval seconds, until the answer comes or the wait expires.
+    """
+
+    id: str
+    expires_in: int
+    interval: int
+    on_expiry: NotRequired[OnExpiry]
+
+
+class Decision(TypedDict):
+    action_id: str
+    verdict: Verdict
+    rule_id: str | None
+    observed: list[ObservedRule]
+    permission: NotRequired[PermissionOutcome]
+    budget: NotRequired[BudgetOutcome]
+    approval: NotRequired[Approval]
+    decided_at: str
 
 
 class SnapshotAgent(TypedDict, closed=True):
