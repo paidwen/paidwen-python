@@ -68,14 +68,47 @@ class PermissionOutcome(TypedDict):
     server: NotRequired[str]
 
 
+BudgetWindow: TypeAlias = Literal["daily", "monthly"]
+
+
+class BudgetOutcome(TypedDict):
+    """
+    The budget of the agent refused the action, and counts as block. The spent amount had reached the limit, or the spent amount and the estimated cost would exceed it.
+    """
+
+    exceeded: BudgetWindow
+    spent_usd: float
+    limit_usd: float
+
+
 class Decision(TypedDict):
     action_id: str
     verdict: Verdict
     rule_id: str | None
     observed: list[ObservedRule]
     permission: NotRequired[PermissionOutcome]
+    budget: NotRequired[BudgetOutcome]
     approval: NotRequired[Approval]
     decided_at: str
+
+
+ApprovalState: TypeAlias = Literal["pending", "approved", "denied", "expired"]
+
+
+OnExpiry: TypeAlias = Literal["deny", "allow"]
+
+
+class ApprovalStatus(TypedDict):
+    """
+    The state of an approval, as the agent polls it.
+    """
+
+    id: str
+    action_id: str
+    status: ApprovalState
+    expires_at: str
+    interval: int
+    on_expiry: OnExpiry
 
 
 class Problem(TypedDict):
@@ -99,6 +132,27 @@ RiskLevel: TypeAlias = Literal["low", "medium", "high", "critical"]
 Labels: TypeAlias = dict[str, str]
 
 
+BudgetLimit: TypeAlias = float
+
+
+class Budget(TypedDict, closed=True):
+    """
+    The limits of the agent per calendar day and per calendar month, in UTC. At a limit, the agent receives block until the next window.
+    """
+
+    daily_usd: NotRequired[BudgetLimit]
+    monthly_usd: NotRequired[BudgetLimit]
+
+
+class BudgetPatch(TypedDict, closed=True):
+    """
+    The limits to set. A limit set to null is removed. Null in place of the object removes the budget.
+    """
+
+    daily_usd: NotRequired[float | None]
+    monthly_usd: NotRequired[float | None]
+
+
 class Agent(TypedDict, closed=True):
     id: str
     name: str
@@ -109,6 +163,8 @@ class Agent(TypedDict, closed=True):
     environment: Environment
     risk_level: NotRequired[RiskLevel]
     labels: Labels
+    budget: NotRequired[Budget]
+    record_content: bool
     created_at: str
     updated_at: str
 
@@ -122,6 +178,8 @@ class AgentCreate(TypedDict, closed=True):
     environment: Environment
     risk_level: NotRequired[RiskLevel]
     labels: NotRequired[Labels]
+    budget: NotRequired[Budget]
+    record_content: NotRequired[bool]
 
 
 class AgentPatch(TypedDict, closed=True):
@@ -132,6 +190,8 @@ class AgentPatch(TypedDict, closed=True):
     model_provider: NotRequired[str | None]
     risk_level: NotRequired[Literal["low", "medium", "high", "critical"] | None]
     labels: NotRequired[dict[str, str | None] | None]
+    budget: NotRequired[BudgetPatch | None]
+    record_content: NotRequired[bool]
 
 
 class AgentList(TypedDict):
@@ -180,6 +240,7 @@ class Rule(TypedDict, closed=True):
     condition: str
     verdict: Verdict
     mode: RuleMode
+    approval_group_id: NotRequired[str]
     created_at: str
     updated_at: str
 
@@ -189,6 +250,7 @@ class RuleCreate(TypedDict, closed=True):
     condition: str
     verdict: Verdict
     mode: RuleMode
+    approval_group_id: NotRequired[str]
 
 
 class RulePatch(TypedDict, closed=True):
@@ -196,6 +258,7 @@ class RulePatch(TypedDict, closed=True):
     condition: NotRequired[str]
     verdict: NotRequired[Verdict]
     mode: NotRequired[RuleMode]
+    approval_group_id: NotRequired[str | None]
 
 
 class RuleList(TypedDict):
@@ -203,37 +266,195 @@ class RuleList(TypedDict):
     has_more: bool
 
 
+WaitingVerdict: TypeAlias = Literal["require_approval", "escalate"]
+
+
+ExpiresIn: TypeAlias = int
+
+
+Member: TypeAlias = str
+
+
+class ApprovalGroup(TypedDict, closed=True):
+    id: str
+    name: str
+    members: list[Member]
+    slack_channel: NotRequired[str]
+    expires_in: ExpiresIn
+    on_expiry: OnExpiry
+    default_for: list[WaitingVerdict]
+    created_at: str
+    updated_at: str
+
+
+class ApprovalGroupCreate(TypedDict, closed=True):
+    name: str
+    members: list[Member]
+    slack_channel: NotRequired[str]
+    expires_in: NotRequired[int]
+    on_expiry: NotRequired[Literal["deny", "allow"]]
+    default_for: NotRequired[list[WaitingVerdict]]
+
+
+class ApprovalGroupPatch(TypedDict, closed=True):
+    name: NotRequired[str]
+    members: NotRequired[list[Member]]
+    slack_channel: NotRequired[str | None]
+    expires_in: NotRequired[ExpiresIn]
+    on_expiry: NotRequired[OnExpiry]
+    default_for: NotRequired[list[WaitingVerdict]]
+
+
+class ApprovalGroupList(TypedDict):
+    data: list[ApprovalGroup]
+    has_more: bool
+
+
+class AgentReference(TypedDict):
+    id: str
+    name: str
+
+
+class RuleReference(TypedDict):
+    id: str
+    name: NotRequired[str]
+    condition: NotRequired[str]
+
+
+ApprovalChannel: TypeAlias = Literal["slack", "email", "api", "expiry"]
+
+
+class ApprovalRequest(TypedDict):
+    """
+    An action that waits, or waited, for a human answer.
+    """
+
+    id: str
+    action_id: str
+    agent: AgentReference
+    tool: Tool
+    params: NotRequired[dict[str, Any]]
+    cost: NotRequired[Cost]
+    verdict: WaitingVerdict
+    rule: NotRequired[RuleReference]
+    group_id: NotRequired[str]
+    status: ApprovalState
+    expires_at: str
+    on_expiry: OnExpiry
+    channel: NotRequired[ApprovalChannel]
+    answered_by: NotRequired[str]
+    answered_at: NotRequired[str]
+    comment: NotRequired[str]
+    created_at: str
+
+
+class ApprovalRequestList(TypedDict):
+    data: list[ApprovalRequest]
+    has_more: bool
+
+
+ApprovalAnswerValue: TypeAlias = Literal["approve", "deny"]
+
+
+class ApprovalAnswer(TypedDict, closed=True):
+    answer: ApprovalAnswerValue
+    comment: NotRequired[str]
+
+
+class ApprovalLinkAnswer(TypedDict, closed=True):
+    answer: ApprovalAnswerValue
+
+
+class AuditApproval(TypedDict):
+    id: str
+    status: ApprovalState
+    channel: NotRequired[ApprovalChannel]
+    answered_by: NotRequired[str]
+    answered_at: NotRequired[str]
+    comment: NotRequired[str]
+
+
+class AuditExecution(TypedDict):
+    """
+    The call of the tool by the agent, from its request until its return.
+    """
+
+    requested_at: str
+    started_at: NotRequired[str]
+    ended_at: str
+    status: Literal["ok", "error"]
+    error_type: NotRequired[str]
+
+
+class AuditRecord(TypedDict):
+    """
+    Who did an action, when, why, with which agent and with which permission, read from the journal only.
+    """
+
+    action_id: str
+    agent: AgentReference
+    tool: Tool
+    params: NotRequired[dict[str, Any]]
+    cost: NotRequired[Cost]
+    session_id: NotRequired[str]
+    decided_at: str
+    verdict: Verdict
+    rule: NotRequired[RuleReference]
+    observed: list[ObservedRule]
+    permission: NotRequired[PermissionOutcome]
+    budget: NotRequired[BudgetOutcome]
+    approval: NotRequired[AuditApproval]
+    execution: NotRequired[AuditExecution]
+    lines: NotRequired[list[dict[str, Any]]]
+
+
 KeyDigest: TypeAlias = str
 
 
-class SnapshotAgent(TypedDict, closed=True):
-    id: str
-    name: str
-    owner: NotRequired[str]
-    team: NotRequired[str]
-    environment: Environment
-    risk_level: NotRequired[RiskLevel]
-    labels: NotRequired[Labels]
-    key_digests: list[KeyDigest]
-    permissions: NotRequired[AgentPermissions]
+class SnapshotBudget(TypedDict, closed=True):
+    """
+    The limits of the agent, in billionths of a US dollar.
+    """
+
+    daily_nanousd: NotRequired[int]
+    monthly_nanousd: NotRequired[int]
 
 
 class SnapshotRule(TypedDict, closed=True):
     id: str
+    name: NotRequired[str]
     condition: str
     verdict: Verdict
     mode: RuleMode
+    approval_group_id: NotRequired[str]
 
 
-class Snapshot(TypedDict, closed=True):
+class SnapshotApprovalGroup(TypedDict, closed=True):
+    id: str
+    expires_in: ExpiresIn
+    on_expiry: OnExpiry
+
+
+class SnapshotApprovalDefaults(TypedDict, closed=True):
     """
-    Everything the decision point needs to answer for one organization, held in memory: its revision, its agents with the digests of their active keys and their permissions, and its rules in the order of the organization.
+    The approval group of each waiting verdict, when a rule names no group.
     """
 
-    organization_id: str
-    revision: int
-    agents: list[SnapshotAgent]
-    rules: list[SnapshotRule]
+    require_approval: NotRequired[str]
+    escalate: NotRequired[str]
+
+
+class ConformanceApprovalGroup(TypedDict, closed=True):
+    """
+    An approval group of a conformance case. Its identifier is local to the case.
+    """
+
+    id: str
+    name: str
+    members: list[str]
+    expires_in: NotRequired[ExpiresIn]
+    on_expiry: NotRequired[OnExpiry]
+    default_for: NotRequired[list[WaitingVerdict]]
 
 
 class ConformanceRule(TypedDict, closed=True):
@@ -246,6 +467,7 @@ class ConformanceRule(TypedDict, closed=True):
     condition: str
     verdict: Verdict
     mode: RuleMode
+    approval_group: NotRequired[str]
 
 
 class ConformanceExpectation(TypedDict, closed=True):
@@ -253,18 +475,49 @@ class ConformanceExpectation(TypedDict, closed=True):
     rule_id: str | None
     observed: list[ObservedRule]
     awaits_approval: bool
+    approval_expires_in: NotRequired[int]
     permission: NotRequired[PermissionOutcome]
+    budget: NotRequired[BudgetOutcome]
 
 
 class ConformanceCase(TypedDict, closed=True):
     """
-    One example of the conformance suite: an agent, its permissions, the rules of its organization, a request and the expected decision. The server and both SDKs must pass every case.
+    One example of the conformance suite: an agent, its permissions and its budget, the approval groups and the rules of its organization, a request and the expected decision. The server and both SDKs must pass every case.
     """
 
     name: str
     description: str
     agent: AgentCreate
     permissions: NotRequired[AgentPermissions]
+    approval_groups: NotRequired[list[ConformanceApprovalGroup]]
     rules: list[ConformanceRule]
     request: DecisionRequest
     expected: ConformanceExpectation
+
+
+class SnapshotAgent(TypedDict, closed=True):
+    id: str
+    name: str
+    owner: NotRequired[str]
+    team: NotRequired[str]
+    environment: Environment
+    risk_level: NotRequired[RiskLevel]
+    labels: NotRequired[Labels]
+    key_digests: list[KeyDigest]
+    permissions: NotRequired[AgentPermissions]
+    budget: NotRequired[SnapshotBudget]
+    record_content: NotRequired[bool]
+
+
+class Snapshot(TypedDict, closed=True):
+    """
+    Everything the decision point needs to answer for one organization, held in memory: its revision, the retention of its journal, its approval groups, its agents with the digests of their active keys, their permissions and their budget, and its rules in the order of the organization.
+    """
+
+    organization_id: str
+    revision: int
+    retention_days: NotRequired[int]
+    approval_groups: NotRequired[list[SnapshotApprovalGroup]]
+    approval_defaults: NotRequired[SnapshotApprovalDefaults]
+    agents: list[SnapshotAgent]
+    rules: list[SnapshotRule]
