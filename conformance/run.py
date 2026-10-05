@@ -1,16 +1,35 @@
 import json
 import sys
+import time
+from typing import Any
 
-from paidwen import Paidwen
+from paidwen import Paidwen, RequestError
 
 
 def main() -> None:
     with open(sys.argv[1], encoding="utf-8") as file:
         plan = json.load(file)
-    results = []
-    for entry in plan["cases"]:
-        with Paidwen(entry["api_key"], base_url=plan["base_url"]) as paidwen:
-            results.append({"name": entry["name"], "decision": paidwen.decide(**entry["request"])})
+    results: list[dict[str, Any]] = []
+    for step in plan["steps"]:
+        options: dict[str, Any] = {"base_url": plan["base_url"]}
+        if "timeout_ms" in step:
+            options["timeout"] = step["timeout_ms"] / 1000
+        if "on_unavailable" in step:
+            options["on_unavailable"] = step["on_unavailable"]
+        with Paidwen(step["api_key"], **options) as paidwen:
+            started = time.perf_counter()
+            try:
+                decision = paidwen.decide(**step["request"])
+                results.append({"name": step["name"], "decision": decision})
+            except RequestError as error:
+                problem = error.problem or {}
+                results.append(
+                    {
+                        "name": step["name"],
+                        "error": {"status": error.status, "type": problem.get("type")},
+                    }
+                )
+            results[-1]["elapsed_ms"] = (time.perf_counter() - started) * 1000
     sys.stdout.write(json.dumps({"results": results}) + "\n")
 
 

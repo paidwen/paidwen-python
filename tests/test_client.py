@@ -190,6 +190,22 @@ def test_tool_never_runs_the_function_when_paidwen_denies_it(verdict: str) -> No
     assert calls == []
 
 
+def test_tool_says_when_the_permissions_of_the_agent_refuse_the_action() -> None:
+    refused = {**decision("block"), "permission": {"allowed": False}}
+    paidwen = client(server(200, refused))
+
+    @paidwen.tool("payments.transfer")
+    def transfer() -> None:
+        raise AssertionError("the function must not run")
+
+    with pytest.raises(DeniedError) as raised:
+        transfer()
+    assert str(raised.value) == (
+        f"Paidwen answered block for action {ACTION_ID} "
+        "because the permissions of the agent do not allow it."
+    )
+
+
 @pytest.mark.parametrize("verdict", ["require_approval", "escalate"])
 def test_tool_waits_when_paidwen_asks_for_a_human_answer(verdict: str) -> None:
     paidwen = client(server(200, decision(verdict, "rule-1")))

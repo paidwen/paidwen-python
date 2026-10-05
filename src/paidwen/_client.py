@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import functools
 import inspect
 import logging
@@ -11,6 +10,7 @@ from datetime import datetime, timezone
 from types import TracebackType
 from typing import Any, Literal, TypeVar, cast
 
+import anyio.to_thread
 import httpx
 
 from ._contract import ActionContext, Cost, Decision, DecisionRequest, Problem, Tool
@@ -20,6 +20,8 @@ Fallback = Literal["allow", "block"]
 
 DEFAULT_BASE_URL = "https://api.paidwen.com"
 DEFAULT_TIMEOUT = 3.0
+
+_CAPTURED = "_paidwen_captured"
 
 logger = logging.getLogger("paidwen")
 
@@ -108,7 +110,7 @@ class Paidwen:
 
                 @functools.wraps(function)
                 async def run_async(*args: Any, **kwargs: Any) -> Any:
-                    _enforce(await asyncio.to_thread(ask, args, kwargs))
+                    _enforce(await anyio.to_thread.run_sync(functools.partial(ask, args, kwargs)))
                     return await function(*args, **kwargs)
 
                 return cast(F, run_async)
@@ -121,6 +123,53 @@ class Paidwen:
             return cast(F, run)
 
         return decorate
+
+    def mcp(self, target: Any) -> Callable[[], None]:
+        send = getattr(target, "send_request", None)
+        if not callable(send):
+            raise PaidwenError(
+                "mcp() takes the ClientSession class of the MCP SDK, or one of its sessions."
+            )
+        if getattr(target, _CAPTURED, False):
+            raise PaidwenError("This MCP session is already captured by Paidwen.")
+        own = vars(target).get("send_request")
+        ask = self._ask_mcp
+
+        if isinstance(target, type):
+
+            async def send_class(session: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
+                await ask(session, request)
+                return await send(session, request, *args, **kwargs)
+
+            wrapped = functools.wraps(send)(send_class)
+        else:
+
+            async def send_session(request: Any, *args: Any, **kwargs: Any) -> Any:
+                await ask(target, request)
+                return await send(request, *args, **kwargs)
+
+            wrapped = functools.wraps(send)(send_session)
+        target.send_request = wrapped
+        setattr(target, _CAPTURED, True)
+
+        def release() -> None:
+            if own is None:
+                delattr(target, "send_request")
+            else:
+                target.send_request = own
+            delattr(target, _CAPTURED)
+
+        return release
+
+    async def _ask_mcp(self, session: Any, request: Any) -> None:
+        call = _tool_call(session, request)
+        if call is None:
+            return
+        tool, params = call
+        decision = await anyio.to_thread.run_sync(
+            functools.partial(self.decide, tool=tool, params=params)
+        )
+        _enforce(decision)
 
     def close(self) -> None:
         if self._owns_client:
@@ -167,6 +216,22 @@ def _params(
         else:
             params[name] = value
     return params
+
+
+def _tool_call(session: Any, request: Any) -> tuple[Tool, dict[str, Any]] | None:
+    dump = getattr(request, "model_dump", None)
+    data = dump(by_alias=True, mode="json", exclude_none=True) if callable(dump) else request
+    if not isinstance(data, Mapping) or data.get("method") != "tools/call":
+        return None
+    params = data.get("params")
+    call: Mapping[str, Any] = params if isinstance(params, Mapping) else {}
+    name = call.get("name")
+    arguments = call.get("arguments")
+    tool: Tool = {"name": name if isinstance(name, str) else "", "kind": "mcp"}
+    server = getattr(getattr(session, "server_info", None), "name", None)
+    if isinstance(server, str) and 1 <= len(server) <= 256:
+        tool["server"] = server
+    return tool, dict(arguments) if isinstance(arguments, Mapping) else {}
 
 
 def _enforce(decision: Decision) -> None:

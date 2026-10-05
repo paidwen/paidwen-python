@@ -6,6 +6,7 @@ from ._contract import (
     Decision,
     DecisionRequest,
     ObservedRule,
+    PermissionOutcome,
     Problem,
     Tool,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "Paidwen",
     "PaidwenError",
     "PendingError",
+    "PermissionOutcome",
     "Problem",
     "RequestError",
     "Tool",

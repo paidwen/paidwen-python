@@ -34,5 +34,10 @@ class RequestError(PaidwenError):
 
 
 def _describe(decision: Decision) -> str:
-    rule = "" if decision["rule_id"] is None else f" by rule {decision['rule_id']}"
-    return f"Paidwen answered {decision['verdict']} for action {decision['action_id']}{rule}."
+    answer = f"Paidwen answered {decision['verdict']} for action {decision['action_id']}"
+    if decision["rule_id"] is not None:
+        return f"{answer} by rule {decision['rule_id']}."
+    permission = decision.get("permission")
+    if permission is not None and not permission["allowed"]:
+        return f"{answer} because the permissions of the agent do not allow it."
+    return f"{answer}."
