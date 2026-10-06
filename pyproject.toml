@@ -1,6 +1,6 @@
 [project]
 name = "paidwen"
-version = "0.7.0"
+version = "0.8.0"
 description = "Paidwen SDK: the agent asks Paidwen before each action and applies the answer."
 readme = "README.md"
 license = "Apache-2.0"
@@ -20,7 +20,8 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/RaselisonToky/paidwen"
+Homepage = "https://paidwen.com/docs"
+Repository = "https://github.com/paidwen/paidwen-python"
 
 [build-system]
 requires = ["hatchling>=1.27"]

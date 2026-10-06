@@ -6,9 +6,9 @@ from typing import Any
 
 import anyio
 import pytest
-from fake import APPROVAL_ID, FakePaidwen, serve, status, waiting
+from fake import APPROVAL_ID, DISABLED, FakePaidwen, serve, status, waiting
 
-from paidwen import DeniedError, Paidwen, PendingError, Wait
+from paidwen import DeniedError, Paidwen, PendingError, RequestError, Wait
 
 
 @pytest.fixture
@@ -100,6 +100,27 @@ def test_an_unavailable_poll_is_tried_again(fake: FakePaidwen) -> None:
 
     assert refund() == "ran"
     assert len(fake.polls) == 2
+
+
+def test_a_refused_agent_stops_the_wait_at_once(fake: FakePaidwen) -> None:
+    fake.script = [(403, DISABLED), status("approved")]
+    waits: list[Wait] = []
+    runs: list[int] = []
+    paidwen = client(fake, on_unavailable="allow", on_wait=waits.append)
+
+    @paidwen.tool("payments.refund")
+    def refund(amount: int) -> None:
+        runs.append(amount)
+
+    with pytest.raises(RequestError) as raised:
+        refund(2500)
+    assert raised.value.status == 403
+    assert str(raised.value) == (
+        "Paidwen refused the agent: The agent is disabled until someone enables it."
+    )
+    assert runs == []
+    assert waits == []
+    assert len(fake.polls) == 1
 
 
 def test_on_pending_raise_returns_the_hand(fake: FakePaidwen) -> None:

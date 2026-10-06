@@ -14,9 +14,9 @@ import httpx
 import pytest
 import requests
 import urllib3
-from fake import FakePaidwen, decision, serve
+from fake import DISABLED, FakePaidwen, decision, serve
 
-from paidwen import DeniedError, Paidwen, PaidwenError
+from paidwen import DeniedError, Paidwen, PaidwenError, RequestError
 
 
 @dataclass
@@ -128,6 +128,27 @@ def test_a_refused_httpx_call_is_never_sent(
     capture()
     with pytest.raises(DeniedError, match="no-refunds"):
         httpx.post(f"{api.url}/v1/refunds")
+    assert api.received == []
+
+
+def test_a_refused_agent_never_sends_the_call_even_with_allow(api: Api) -> None:
+    paidwen = Paidwen(
+        "pw_test_key",
+        base_url="https://api.example.test",
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(403, json=DISABLED))
+        ),
+        journal=False,
+        on_unavailable="allow",
+    )
+    paidwen.http()
+    try:
+        with pytest.raises(RequestError, match=r"^Paidwen refused the agent"):
+            httpx.post(f"{api.url}/v1/refunds", json={"amount": 2500})
+        with pytest.raises(RequestError, match=r"^Paidwen refused the agent"):
+            requests.post(f"{api.url}/v1/refunds", json={"amount": 2500})
+    finally:
+        paidwen.close()
     assert api.received == []
 
 

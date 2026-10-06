@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fake import DISABLED
 
 from paidwen import (
     Decision,
@@ -20,7 +21,18 @@ from paidwen import (
 )
 
 ACTION_ID = "6f1c2a7e-3b5d-4c8e-9a10-2f4b6d8e0a12"
+INCIDENT = {"id": "3c7e5a10-9b2d-4f6e-8a1c-5d4b3a2f1e0d", "kind": "quarantine"}
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+QUOTA_CAUSE = (
+    "Paidwen answered HTTP 503 because the organization reached the events its plan allows"
+    " this month"
+)
+QUOTA = {
+    "type": "https://paidwen.com/problems/quota-exceeded",
+    "title": "The organization reached the events its plan allows this month.",
+    "status": 503,
+    "detail": "The organization used the 5000 events of the Free plan in October 2026.",
+}
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -156,6 +168,64 @@ def test_decide_raises_a_request_error_when_paidwen_refuses_the_request() -> Non
     assert raised.value.problem == problem
 
 
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (DISABLED, "Paidwen refused the agent: The agent is disabled until someone enables it."),
+        (
+            {key: value for key, value in DISABLED.items() if key != "detail"},
+            "Paidwen refused the agent: The agent is disabled.",
+        ),
+        ("", "Paidwen refused the agent with HTTP 403."),
+    ],
+)
+def test_decide_says_that_paidwen_refused_the_agent_and_never_falls_back(
+    body: Any, message: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    requests: list[httpx.Request] = []
+    paidwen = client(server(403, body, requests), on_unavailable="allow")
+    with caplog.at_level(logging.WARNING, logger="paidwen"), pytest.raises(RequestError) as raised:
+        paidwen.decide(tool={"name": "x", "kind": "function"})
+    assert raised.value.status == 403
+    assert str(raised.value) == message
+    assert len(requests) == 1
+    assert caplog.records == []
+
+
+def test_a_quota_exceeded_applies_on_unavailable_and_names_the_cause(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="paidwen"):
+        blocked = client(server(503, QUOTA)).decide(tool={"name": "x", "kind": "function"})
+        allowed = client(server(503, QUOTA), on_unavailable="allow").decide(
+            tool={"name": "x", "kind": "function"}
+        )
+    assert blocked["verdict"] == "block"
+    assert allowed["verdict"] == "allow"
+    assert [record.getMessage() for record in caplog.records if record.name == "paidwen"] == [
+        f'{QUOTA_CAUSE}, so the SDK applies on_unavailable "block": {QUOTA["detail"]}',
+        f'{QUOTA_CAUSE}, so the SDK applies on_unavailable "allow": {QUOTA["detail"]}',
+    ]
+
+
+def test_the_warning_repeats_the_problem_of_a_server_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    starting = {
+        "type": "https://paidwen.com/problems/unavailable",
+        "title": "The service cannot answer yet.",
+        "status": 503,
+    }
+    with caplog.at_level(logging.WARNING, logger="paidwen"):
+        client(server(503, starting)).decide(tool={"name": "x", "kind": "function"})
+        client(server(502, "<html>")).decide(tool={"name": "x", "kind": "function"})
+    assert [record.getMessage() for record in caplog.records if record.name == "paidwen"] == [
+        'Paidwen answered HTTP 503, so the SDK applies on_unavailable "block":'
+        " The service cannot answer yet.",
+        'Paidwen answered HTTP 502, so the SDK applies on_unavailable "block".',
+    ]
+
+
 def test_tool_runs_the_function_when_paidwen_allows_it() -> None:
     requests: list[httpx.Request] = []
     paidwen = client(server(200, decision("allow"), requests))
@@ -232,6 +302,74 @@ def test_tool_says_when_the_permissions_of_the_agent_refuse_the_action() -> None
         f"Paidwen answered block for action {ACTION_ID} "
         "because the permissions of the agent do not allow it."
     )
+
+
+@pytest.mark.parametrize(
+    ("answer", "message"),
+    [
+        (
+            {**decision("quarantine"), "incident": INCIDENT},
+            f"Paidwen answered quarantine for action {ACTION_ID} "
+            f"because the agent is in quarantine (incident {INCIDENT['id']}).",
+        ),
+        (
+            {**decision("quarantine", "rule-7"), "incident": INCIDENT},
+            f"Paidwen answered quarantine for action {ACTION_ID} by rule rule-7, "
+            f"and the agent is in quarantine (incident {INCIDENT['id']}).",
+        ),
+        (
+            {**decision("allow"), "incident": INCIDENT},
+            f"Paidwen answered allow for action {ACTION_ID} "
+            f"because the agent is in quarantine (incident {INCIDENT['id']}).",
+        ),
+    ],
+)
+def test_tool_says_that_the_agent_is_in_quarantine_and_names_the_incident(
+    answer: dict[str, Any], message: str
+) -> None:
+    paidwen = client(server(200, answer))
+
+    @paidwen.tool("x")
+    def run() -> None:
+        raise AssertionError("the function must not run")
+
+    with pytest.raises(DeniedError) as raised:
+        run()
+    assert str(raised.value) == message
+    assert raised.value.incident == INCIDENT
+    assert raised.value.decision["incident"] == INCIDENT
+
+
+def test_tool_never_runs_when_paidwen_refuses_the_agent_even_with_allow() -> None:
+    requests: list[httpx.Request] = []
+    paidwen = client(server(403, DISABLED, requests), on_unavailable="allow")
+
+    @paidwen.tool("x")
+    def run() -> None:
+        raise AssertionError("the function must not run")
+
+    with pytest.raises(RequestError, match=r"^Paidwen refused the agent: The agent is disabled"):
+        run()
+    assert len(requests) == 1
+
+
+def test_tool_runs_when_the_quota_is_reached_and_the_agent_chose_allow() -> None:
+    runs: list[str] = []
+    allowing = client(server(503, QUOTA), on_unavailable="allow")
+    blocking = client(server(503, QUOTA))
+
+    @allowing.tool("x")
+    def allowed() -> None:
+        runs.append("allowed")
+
+    @blocking.tool("x")
+    def blocked() -> None:
+        runs.append("blocked")
+
+    allowed()
+    with pytest.raises(DeniedError):
+        blocked()
+    assert runs == ["allowed"]
 
 
 @pytest.mark.parametrize("verdict", ["require_approval", "escalate"])

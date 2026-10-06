@@ -31,14 +31,15 @@ from ._contract import (
     Problem,
     Tool,
 )
-from ._errors import DeniedError, PaidwenError, PendingError, RequestError
+from ._errors import DeniedError, PaidwenError, PendingError, RequestError, reason_of
 from ._journal import Journal, finish, quiet_call, started, trace_id, traceparent
 
 Fallback = Literal["allow", "block"]
 OnPending = Literal["wait", "raise"]
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 DEFAULT_BASE_URL = "https://api.paidwen.com"
+QUOTA_EXCEEDED = "https://paidwen.com/problems/quota-exceeded"
 DEFAULT_TIMEOUT = 3.0
 SLOW_DOWN_SECONDS = 5
 WAIT_GRACE_SECONDS = 60
@@ -166,20 +167,18 @@ class Paidwen:
                 )
             )
         except httpx.HTTPError as error:
-            return self._fallback(request, error)
+            return self._fallback(request, "Paidwen did not answer", str(error))
         if response.status_code >= 500:
+            problem = _problem(response)
             return self._fallback(
-                request, PaidwenError(f"Paidwen answered HTTP {response.status_code}.")
+                request, _unavailable(response.status_code, problem), reason_of(problem)
             )
+        if not response.is_success:
+            raise RequestError(response.status_code, _problem(response))
         try:
             body = response.json()
         except ValueError as error:
-            if response.is_success:
-                return self._fallback(request, error)
-            body = None
-        if not response.is_success:
-            problem = cast(Problem, body) if isinstance(body, dict) else None
-            raise RequestError(response.status_code, problem)
+            return self._fallback(request, "Paidwen did not answer", str(error))
         return cast(Decision, body)
 
     def _poll(self, approval_id: str) -> tuple[str, ApprovalStatus | None]:
@@ -201,13 +200,12 @@ class Paidwen:
             return "slow_down", None
         if response.status_code >= 500:
             return "unavailable", None
+        if not response.is_success:
+            raise RequestError(response.status_code, _problem(response))
         try:
             body = response.json()
         except ValueError:
             return "unavailable", None
-        if not response.is_success:
-            problem = cast(Problem, body) if isinstance(body, dict) else None
-            raise RequestError(response.status_code, problem)
         return "status", cast(ApprovalStatus, body)
 
     def _deadline(self, decision: Decision) -> tuple[dict[str, Any], datetime]:
@@ -299,10 +297,10 @@ class Paidwen:
     def _verdict(self, decision: Decision, span: Span) -> bool:
         span.set_attribute("paidwen.action.id", decision["action_id"])
         verdict = decision["verdict"]
+        if decision.get("incident") is not None or verdict in ("block", "quarantine"):
+            raise DeniedError(decision)
         if verdict == "allow":
             return True
-        if verdict in ("block", "quarantine"):
-            raise DeniedError(decision)
         if decision.get("approval") is None:
             raise PendingError(decision)
         return False
@@ -527,11 +525,12 @@ class Paidwen:
     ) -> None:
         self.close()
 
-    def _fallback(self, request: DecisionRequest, cause: BaseException) -> Decision:
+    def _fallback(self, request: DecisionRequest, cause: str, reason: str | None) -> Decision:
         logger.warning(
-            'Paidwen did not answer, so the SDK applies on_unavailable "%s": %s',
-            self._on_unavailable,
+            '%s, so the SDK applies on_unavailable "%s"%s',
             cause,
+            self._on_unavailable,
+            f": {reason}" if reason else ".",
         )
         return {
             "action_id": request["action_id"],
@@ -540,6 +539,21 @@ class Paidwen:
             "observed": [],
             "decided_at": datetime.now(timezone.utc).isoformat(),
         }
+
+
+def _problem(response: httpx.Response) -> Problem | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    return cast(Problem, body) if isinstance(body, dict) else None
+
+
+def _unavailable(status: int, problem: Problem | None) -> str:
+    answered = f"Paidwen answered HTTP {status}"
+    if problem is not None and problem.get("type") == QUOTA_EXCEEDED:
+        return f"{answered} because the organization reached the events its plan allows this month"
+    return answered
 
 
 def _attributes(tool: Tool) -> dict[str, Any]:

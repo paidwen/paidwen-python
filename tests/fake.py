@@ -13,6 +13,12 @@ from typing import Any
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 APPROVAL_ID = "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a"
+DISABLED = {
+    "type": "https://paidwen.com/problems/agent-disabled",
+    "title": "The agent is disabled.",
+    "status": 403,
+    "detail": "The agent is disabled until someone enables it.",
+}
 
 
 @dataclass

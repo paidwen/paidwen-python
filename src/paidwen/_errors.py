@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from ._contract import ApprovalStatus, Decision, Problem
 
 
@@ -14,6 +12,7 @@ class DeniedError(PaidwenError):
         super().__init__(_describe(decision, approval))
         self.decision = decision
         self.approval = approval
+        self.incident = decision.get("incident")
 
 
 class PendingError(PaidwenError):
@@ -24,14 +23,27 @@ class PendingError(PaidwenError):
 
 class RequestError(PaidwenError):
     def __init__(self, status: int, problem: Problem | None) -> None:
-        details: dict[str, Any] = dict(problem) if problem else {}
-        super().__init__(
-            details.get("detail")
-            or details.get("title")
-            or f"Paidwen refused the request with HTTP {status}."
-        )
+        super().__init__(_refusal(status, problem))
         self.status = status
         self.problem = problem
+
+
+def reason_of(problem: Problem | None) -> str | None:
+    if problem is None:
+        return None
+    for text in (problem.get("detail"), problem.get("title")):
+        if isinstance(text, str) and text:
+            return text
+    return None
+
+
+def _refusal(status: int, problem: Problem | None) -> str:
+    reason = reason_of(problem)
+    if status == 403:
+        if reason is None:
+            return "Paidwen refused the agent with HTTP 403."
+        return f"Paidwen refused the agent: {reason}"
+    return reason or f"Paidwen refused the request with HTTP {status}."
 
 
 def _describe(decision: Decision, approval: ApprovalStatus | None) -> str:
@@ -40,6 +52,12 @@ def _describe(decision: Decision, approval: ApprovalStatus | None) -> str:
         return f"{answer}, and the approver denied it."
     if approval is not None and approval["status"] == "expired":
         return f"{answer}, and the wait expired without an answer."
+    incident = decision.get("incident")
+    if incident is not None:
+        quarantine = f"the agent is in quarantine (incident {incident['id']})"
+        if decision["rule_id"] is None:
+            return f"{answer} because {quarantine}."
+        return f"{answer} by rule {decision['rule_id']}, and {quarantine}."
     if decision["rule_id"] is not None:
         return f"{answer} by rule {decision['rule_id']}."
     budget = decision.get("budget")
