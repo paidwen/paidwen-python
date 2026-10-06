@@ -132,22 +132,6 @@ class BudgetPatch(TypedDict, closed=True):
     monthly_usd: NotRequired[float | None]
 
 
-class Agent(TypedDict, closed=True):
-    id: str
-    name: str
-    owner: NotRequired[str]
-    team: NotRequired[str]
-    description: NotRequired[str]
-    model_provider: NotRequired[str]
-    environment: Environment
-    risk_level: NotRequired[RiskLevel]
-    labels: Labels
-    budget: NotRequired[Budget]
-    record_content: bool
-    created_at: str
-    updated_at: str
-
-
 class AgentCreate(TypedDict, closed=True):
     name: str
     owner: NotRequired[str]
@@ -171,11 +155,6 @@ class AgentPatch(TypedDict, closed=True):
     labels: NotRequired[dict[str, str | None] | None]
     budget: NotRequired[BudgetPatch | None]
     record_content: NotRequired[bool]
-
-
-class AgentList(TypedDict):
-    data: list[Agent]
-    has_more: bool
 
 
 class AgentKey(TypedDict):
@@ -310,7 +289,7 @@ class RuleReference(TypedDict):
     condition: NotRequired[str]
 
 
-ApprovalChannel: TypeAlias = Literal["slack", "email", "api", "expiry"]
+ApprovalChannel: TypeAlias = Literal["slack", "email", "api", "dashboard", "expiry"]
 
 
 class ApprovalRequest(TypedDict):
@@ -373,28 +352,6 @@ class AuditExecution(TypedDict):
     ended_at: str
     status: Literal["ok", "error"]
     error_type: NotRequired[str]
-
-
-class AuditRecord(TypedDict):
-    """
-    Who did an action, when, why, with which agent and with which permission, read from the journal only.
-    """
-
-    action_id: str
-    agent: AuditAgent
-    tool: Tool
-    params: NotRequired[dict[str, Any]]
-    cost: NotRequired[Cost]
-    session_id: NotRequired[str]
-    decided_at: str
-    verdict: Verdict
-    rule: NotRequired[RuleReference]
-    observed: list[ObservedRule]
-    permission: NotRequired[PermissionOutcome]
-    budget: NotRequired[BudgetOutcome]
-    approval: NotRequired[AuditApproval]
-    execution: NotRequired[AuditExecution]
-    lines: NotRequired[list[dict[str, Any]]]
 
 
 KeyDigest: TypeAlias = str
@@ -484,6 +441,344 @@ class ConformanceCase(TypedDict, closed=True):
     expected: ConformanceExpectation
 
 
+AgentStatus: TypeAlias = Literal["active", "quarantined", "disabled"]
+
+
+class AgentSpent(TypedDict):
+    """
+    What the agent spent today and this month, in US dollars, as its budget counts it.
+    """
+
+    today_usd: float
+    month_usd: float
+
+
+IncidentKind: TypeAlias = Literal["quarantine", "disable", "revoke_keys", "rotate_key"]
+
+
+IncidentState: TypeAlias = Literal["open", "lifted", "done"]
+
+
+class IncidentReference(TypedDict):
+    id: str
+    kind: IncidentKind
+
+
+class IncidentActor(TypedDict):
+    """
+    Who made a gesture, a person, an admin key or a rule.
+    """
+
+    kind: Literal["person", "admin_key", "rule"]
+    email: NotRequired[str]
+    redacted: NotRequired[str]
+    rule: NotRequired[RuleReference]
+
+
+class Incident(TypedDict):
+    id: str
+    agent: AgentReference
+    kind: IncidentKind
+    state: IncidentState
+    reason: NotRequired[str]
+    action_id: NotRequired[str]
+    keys_revoked: NotRequired[int]
+    opened_by: IncidentActor
+    opened_at: str
+    lifted_by: NotRequired[IncidentActor]
+    lifted_at: NotRequired[str]
+    lift_reason: NotRequired[str]
+
+
+class IncidentList(TypedDict):
+    data: list[Incident]
+    has_more: bool
+
+
+class IncidentRequest(TypedDict, closed=True):
+    reason: NotRequired[str]
+
+
+class RotatedAgentKey(TypedDict):
+    incident: Incident
+    key: CreatedAgentKey
+
+
+class Action(TypedDict):
+    """
+    An action of an agent and its decision, read from the journal.
+    """
+
+    action_id: str
+    cursor: str
+    agent: AuditAgent
+    tool: Tool
+    verdict: Verdict
+    rule: NotRequired[RuleReference]
+    observed: list[ObservedRule]
+    cost: NotRequired[Cost]
+    session_id: NotRequired[str]
+    decided_at: str
+    approval: NotRequired[AuditApproval]
+    incident: NotRequired[IncidentReference]
+    execution: NotRequired[AuditExecution]
+
+
+class ActionList(TypedDict):
+    data: list[Action]
+    has_more: bool
+
+
+class CostDay(TypedDict):
+    day: str
+    agent: AgentReference
+    models_usd: float
+    tools_usd: float
+    decisions: int
+    model_calls: int
+
+
+CostReport = TypedDict(
+    "CostReport",
+    {
+        "from": str,
+        "to": str,
+        "days": list[CostDay],
+    },
+)
+
+
+class VerdictCounts(TypedDict):
+    allow: int
+    require_approval: int
+    escalate: int
+    block: int
+    quarantine: int
+
+
+class RuleActivity(TypedDict):
+    rule: RuleReference
+    decided: int
+    observed: int
+
+
+AgentActivity = TypedDict(
+    "AgentActivity",
+    {
+        "from": str,
+        "to": str,
+        "verdicts": VerdictCounts,
+        "rules": list[RuleActivity],
+        "models_usd": float,
+        "tools_usd": float,
+    },
+)
+
+
+Role: TypeAlias = Literal["viewer", "member", "admin"]
+
+
+class Person(TypedDict):
+    id: str
+    email: str
+    name: NotRequired[str]
+
+
+PlanID: TypeAlias = Literal["free", "starter", "scale", "business"]
+
+
+class OrganizationSummary(TypedDict):
+    id: str
+    name: str
+    plan: PlanID
+
+
+class Membership(TypedDict):
+    organization: OrganizationSummary
+    role: Role
+    joined_at: str
+
+
+class Me(TypedDict):
+    person: Person
+    memberships: list[Membership]
+
+
+class EmailLinkRequest(TypedDict, closed=True):
+    email: str
+    return_to: NotRequired[str]
+
+
+class EmailLinkVerification(TypedDict, closed=True):
+    token: str
+
+
+class OrganizationCreate(TypedDict, closed=True):
+    name: str
+
+
+Email: TypeAlias = str
+
+
+class IncidentContacts(TypedDict, closed=True):
+    """
+    Who receives the incidents of the organization.
+    """
+
+    emails: list[Email]
+    slack_channel: NotRequired[str]
+
+
+class Organization(TypedDict):
+    id: str
+    name: str
+    plan: PlanID
+    incident_contacts: IncidentContacts
+    created_at: str
+
+
+class IncidentContacts1(TypedDict, closed=True):
+    emails: NotRequired[list[Email]]
+    slack_channel: NotRequired[str | None]
+
+
+class OrganizationPatch(TypedDict, closed=True):
+    name: NotRequired[str]
+    incident_contacts: NotRequired[IncidentContacts1]
+
+
+class Member3(TypedDict):
+    person: Person
+    role: Role
+    joined_at: str
+
+
+class MemberList(TypedDict):
+    data: list[Member3]
+    has_more: bool
+
+
+class MemberPatch(TypedDict, closed=True):
+    role: Role
+
+
+class Invitation(TypedDict):
+    id: str
+    email: str
+    role: Role
+    invited_by: NotRequired[str]
+    created_at: str
+    expires_at: str
+
+
+class InvitationCreate(TypedDict, closed=True):
+    email: str
+    role: Role
+
+
+class InvitationList(TypedDict):
+    data: list[Invitation]
+    has_more: bool
+
+
+class InvitationAcceptance(TypedDict, closed=True):
+    token: str
+
+
+class AdminKey(TypedDict):
+    id: str
+    redacted: str
+    created_by: NotRequired[str]
+    created_at: str
+    revoked_at: str | None
+
+
+class CreatedAdminKey(TypedDict):
+    id: str
+    redacted: str
+    created_by: NotRequired[str]
+    created_at: str
+    revoked_at: str | None
+    secret: str
+
+
+class AdminKeyList(TypedDict):
+    data: list[AdminKey]
+    has_more: bool
+
+
+BillingInterval: TypeAlias = Literal["month", "year"]
+
+
+SubscriptionStatus: TypeAlias = Literal["active", "trialing", "past_due", "paused", "canceled"]
+
+
+class Subscription(TypedDict):
+    status: SubscriptionStatus
+    interval: BillingInterval
+    current_period_start: str
+    current_period_end: str
+    cancel_at: NotRequired[str]
+
+
+class Usage(TypedDict):
+    """
+    The events of the organization this month, as the decision point counts them.
+    """
+
+    month: str
+    events: int
+    included: int
+    limit: NotRequired[int]
+    stopped: bool
+
+
+class Billing(TypedDict):
+    plan: PlanID
+    subscription: NotRequired[Subscription]
+    usage: Usage
+    invoice_cap_usd: NotRequired[float]
+
+
+class BillingPatch(TypedDict, closed=True):
+    invoice_cap_usd: NotRequired[float | None]
+
+
+class CheckoutRequest(TypedDict, closed=True):
+    plan: Literal["starter", "scale", "business"]
+    interval: BillingInterval
+
+
+class Checkout(TypedDict):
+    """
+    What Paddle.js needs to open the checkout of the transaction.
+    """
+
+    transaction_id: str
+    environment: Literal["sandbox", "production"]
+    client_token: str
+
+
+class BillingSync(TypedDict, closed=True):
+    transaction_id: str
+
+
+class PlanChange(TypedDict, closed=True):
+    plan: Literal["starter", "scale", "business"]
+    interval: BillingInterval
+
+
+class BillingPortal(TypedDict):
+    url: str
+
+
+class SlackConnection(TypedDict):
+    connected: bool
+    team_id: NotRequired[str]
+    team_name: NotRequired[str]
+    connected_at: NotRequired[str]
+
+
 class Approval(TypedDict):
     """
     The wait for a human answer. The SDK polls for the answer every interval seconds, until the answer comes or the wait expires.
@@ -503,7 +798,54 @@ class Decision(TypedDict):
     permission: NotRequired[PermissionOutcome]
     budget: NotRequired[BudgetOutcome]
     approval: NotRequired[Approval]
+    incident: NotRequired[IncidentReference]
     decided_at: str
+
+
+class Agent(TypedDict, closed=True):
+    id: str
+    name: str
+    owner: NotRequired[str]
+    team: NotRequired[str]
+    description: NotRequired[str]
+    model_provider: NotRequired[str]
+    environment: Environment
+    risk_level: NotRequired[RiskLevel]
+    labels: Labels
+    budget: NotRequired[Budget]
+    record_content: bool
+    status: AgentStatus
+    spent: NotRequired[AgentSpent]
+    created_at: str
+    updated_at: str
+
+
+class AgentList(TypedDict):
+    data: list[Agent]
+    has_more: bool
+
+
+class AuditRecord(TypedDict):
+    """
+    Who did an action, when, why, with which agent and with which permission, read from the journal only.
+    """
+
+    action_id: str
+    agent: AuditAgent
+    tool: Tool
+    params: NotRequired[dict[str, Any]]
+    cost: NotRequired[Cost]
+    session_id: NotRequired[str]
+    decided_at: str
+    verdict: Verdict
+    rule: NotRequired[RuleReference]
+    observed: list[ObservedRule]
+    permission: NotRequired[PermissionOutcome]
+    budget: NotRequired[BudgetOutcome]
+    approval: NotRequired[AuditApproval]
+    execution: NotRequired[AuditExecution]
+    incident: NotRequired[IncidentReference]
+    lines: NotRequired[list[dict[str, Any]]]
 
 
 class SnapshotAgent(TypedDict, closed=True):
@@ -518,6 +860,8 @@ class SnapshotAgent(TypedDict, closed=True):
     permissions: NotRequired[AgentPermissions]
     budget: NotRequired[SnapshotBudget]
     record_content: NotRequired[bool]
+    status: NotRequired[AgentStatus]
+    incident_id: NotRequired[str]
 
 
 class Snapshot(TypedDict, closed=True):
@@ -528,6 +872,7 @@ class Snapshot(TypedDict, closed=True):
     organization_id: str
     revision: int
     retention_days: NotRequired[int]
+    usage_limit: NotRequired[int]
     approval_groups: NotRequired[list[SnapshotApprovalGroup]]
     approval_defaults: NotRequired[SnapshotApprovalDefaults]
     agents: list[SnapshotAgent]
