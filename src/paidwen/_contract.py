@@ -716,6 +716,7 @@ SubscriptionStatus: TypeAlias = Literal["active", "trialing", "past_due", "pause
 class Subscription(TypedDict):
     status: SubscriptionStatus
     interval: BillingInterval
+    paddle_customer_id: str
     current_period_start: str
     current_period_end: str
     cancel_at: NotRequired[str]
