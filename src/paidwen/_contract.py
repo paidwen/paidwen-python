@@ -582,6 +582,11 @@ class Person(TypedDict):
     id: str
     email: str
     name: NotRequired[str]
+    avatar_url: NotRequired[str]
+
+
+class PersonPatch(TypedDict, closed=True):
+    name: NotRequired[str | None]
 
 
 PlanID: TypeAlias = Literal["free", "starter", "scale", "business"]
