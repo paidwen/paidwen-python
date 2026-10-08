@@ -16,7 +16,11 @@ def main() -> None:
             options["timeout"] = step["timeout_ms"] / 1000
         if "on_unavailable" in step:
             options["on_unavailable"] = step["on_unavailable"]
-        with Paidwen(step["api_key"], **options) as paidwen:
+        if "api_key" in step:
+            options["api_key"] = step["api_key"]
+        if "identity_token_file" in step:
+            options["identity_token_file"] = step["identity_token_file"]
+        with Paidwen(**options) as paidwen:
             started = time.perf_counter()
             try:
                 decision = paidwen.decide(**step["request"])

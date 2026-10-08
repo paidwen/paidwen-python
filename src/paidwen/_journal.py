@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any
 
+import requests
 from opentelemetry import context as otel_context
 from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -67,8 +68,22 @@ class _ModelProcessor(SpanProcessor):
         return True
 
 
+class _Authorization(requests.auth.AuthBase):
+    def __init__(self, authorization: Callable[[], str]) -> None:
+        self._authorization = authorization
+
+    def __call__(self, request: Any) -> Any:
+        try:
+            request.headers["authorization"] = self._authorization()
+        except Exception as error:
+            logger.warning("Paidwen could not prove the identity of the agent: %s", error)
+        return request
+
+
 class Journal:
-    def __init__(self, endpoint: str, api_key: str, enabled: bool, version: str) -> None:
+    def __init__(
+        self, endpoint: str, authorization: Callable[[], str], enabled: bool, version: str
+    ) -> None:
         self._exporter: SpanExporter | None = None
         self._provider = TracerProvider(
             resource=Resource.create(
@@ -76,12 +91,10 @@ class Journal:
             )
         )
         if enabled:
+            session = requests.Session()
+            session.auth = _Authorization(authorization)
             self._exporter = _SilentExporter(
-                OTLPSpanExporter(
-                    endpoint=endpoint,
-                    headers={"authorization": f"Bearer {api_key}"},
-                    timeout=10,
-                )
+                OTLPSpanExporter(endpoint=endpoint, timeout=10, session=session)
             )
             self._provider.add_span_processor(
                 BatchSpanProcessor(self._exporter, schedule_delay_millis=1000)

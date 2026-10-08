@@ -23,6 +23,14 @@ The tool name of an HTTP call is its method and its path, for example `POST /v1/
 
 A refused call raises `DeniedError` and never leaves the process. The SDK asks nothing for its own calls, for the calls made inside an action already decided, and for the hosts that match the `ignore` option, such as `paidwen.http(ignore=["*.internal.example.com"])`. A process has one HTTP capture, and `http()` returns a function that removes it.
 
+## An agent on Kubernetes, AWS or GitHub Actions needs no key
+
+```python
+paidwen = Paidwen(identity_token_file="/var/run/secrets/paidwen/token")
+```
+
+When the platform of the agent signs a token for it, the SDK exchanges this token for an agent token valid for 15 minutes, under a trust rule of your organization, and renews it before it expires. `identity_token_file` reads the token from a file at each exchange, such as the projected token of a Kubernetes service account. `identity_token` takes a function that returns the token, such as a call to `get_web_identity_token` on AWS. Without option, the SDK reads `PAIDWEN_IDENTITY_TOKEN_FILE`. The guide is at https://paidwen.com/docs/workload-identity.
+
 ## A wrapped function asks Paidwen before it runs
 
 ```python

@@ -1,6 +1,6 @@
 [project]
 name = "paidwen"
-version = "0.8.1"
+version = "0.9.0"
 description = "Paidwen SDK: the agent asks Paidwen before each action and applies the answer."
 readme = "README.md"
 license = "Apache-2.0"
@@ -12,6 +12,7 @@ dependencies = [
     "opentelemetry-api>=1.30,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.30,<2",
     "opentelemetry-sdk>=1.30,<2",
+    "requests>=2.28,<3",
     "typing-extensions>=4.12",
 ]
 classifiers = [

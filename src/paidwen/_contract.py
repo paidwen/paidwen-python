@@ -166,6 +166,87 @@ class AgentKeyList(TypedDict):
     has_more: bool
 
 
+class JsonWebKey(TypedDict):
+    """
+    A public key of RFC 7517.
+    """
+
+    kty: Literal["RSA", "EC", "OKP"]
+
+
+class JsonWebKeySet(TypedDict):
+    """
+    The public keys of an issuer, in the JSON Web Key Set format of RFC 7517.
+    """
+
+    keys: list[JsonWebKey]
+
+
+TrustRuleIssuer: TypeAlias = str
+
+
+TrustRuleCondition: TypeAlias = str
+
+
+TrustRuleAgentName: TypeAlias = str
+
+
+class Jwks(TypedDict):
+    """
+    The public keys of the issuer. Null removes them, and the service then reads the keys at the address of the issuer.
+    """
+
+    keys: list[JsonWebKey]
+
+
+class TrustRulePatch(TypedDict, closed=True):
+    name: NotRequired[str]
+    issuer: NotRequired[TrustRuleIssuer]
+    jwks: NotRequired[Jwks | None]
+    condition: NotRequired[TrustRuleCondition]
+    agent_name: NotRequired[TrustRuleAgentName]
+    team: NotRequired[str | None]
+    owner: NotRequired[str | None]
+    enabled: NotRequired[bool]
+
+
+class TokenExchangeRequest(TypedDict):
+    """
+    The form of a token exchange request, following RFC 8693.
+    """
+
+    grant_type: Literal["urn:ietf:params:oauth:grant-type:token-exchange"]
+    subject_token: str
+    subject_token_type: Literal[
+        "urn:ietf:params:oauth:token-type:jwt", "urn:ietf:params:oauth:token-type:id_token"
+    ]
+    requested_token_type: NotRequired[Literal["urn:ietf:params:oauth:token-type:access_token"]]
+    audience: NotRequired[str]
+    resource: NotRequired[str]
+
+
+class TokenExchangeResponse(TypedDict, closed=True):
+    access_token: str
+    issued_token_type: Literal["urn:ietf:params:oauth:token-type:access_token"]
+    token_type: Literal["Bearer"]
+    expires_in: int
+
+
+class TokenError(TypedDict):
+    """
+    An error of the token endpoint, following RFC 6749.
+    """
+
+    error: Literal[
+        "invalid_request",
+        "invalid_target",
+        "unsupported_grant_type",
+        "temporarily_unavailable",
+        "server_error",
+    ]
+    error_description: NotRequired[str]
+
+
 class PermissionEntry(TypedDict, closed=True):
     tool: str
     server: NotRequired[str]
@@ -635,6 +716,7 @@ class Organization(TypedDict):
     name: str
     plan: PlanID
     incident_contacts: IncidentContacts
+    audience: str
     created_at: str
 
 
@@ -818,6 +900,7 @@ class Agent(TypedDict, closed=True):
     record_content: bool
     status: AgentStatus
     spent: NotRequired[AgentSpent]
+    trust_rule_id: NotRequired[str]
     created_at: str
     updated_at: str
 
@@ -837,6 +920,39 @@ class AgentCreate(TypedDict, closed=True):
 
 class AgentList(TypedDict):
     data: list[Agent]
+    has_more: bool
+
+
+class TrustRule(TypedDict, closed=True):
+    id: str
+    name: str
+    issuer: TrustRuleIssuer
+    jwks: NotRequired[JsonWebKeySet]
+    condition: TrustRuleCondition
+    agent_name: TrustRuleAgentName
+    environment: Environment
+    team: NotRequired[TeamHandle]
+    owner: NotRequired[str]
+    enabled: bool
+    agents: int
+    created_at: str
+    updated_at: str
+
+
+class TrustRuleCreate(TypedDict, closed=True):
+    name: str
+    issuer: TrustRuleIssuer
+    jwks: NotRequired[JsonWebKeySet]
+    condition: TrustRuleCondition
+    agent_name: TrustRuleAgentName
+    environment: Environment
+    team: NotRequired[TeamHandle]
+    owner: NotRequired[str]
+    enabled: NotRequired[bool]
+
+
+class TrustRuleList(TypedDict):
+    data: list[TrustRule]
     has_more: bool
 
 
@@ -877,6 +993,7 @@ class SnapshotAgent(TypedDict, closed=True):
     record_content: NotRequired[bool]
     status: NotRequired[AgentStatus]
     incident_id: NotRequired[str]
+    trust_rule_id: NotRequired[str]
 
 
 class Snapshot(TypedDict, closed=True):
@@ -890,6 +1007,7 @@ class Snapshot(TypedDict, closed=True):
     usage_limit: NotRequired[int]
     approval_groups: NotRequired[list[SnapshotApprovalGroup]]
     approval_defaults: NotRequired[SnapshotApprovalDefaults]
+    trust_rules: NotRequired[list[str]]
     agents: list[SnapshotAgent]
     rules: list[SnapshotRule]
 

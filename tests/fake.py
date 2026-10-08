@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs
 
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
@@ -80,6 +81,7 @@ class FakePaidwen:
     decisions: list[Recorded] = field(default_factory=list)
     polls: list[Recorded] = field(default_factory=list)
     traces: list[Recorded] = field(default_factory=list)
+    exchanges: list[dict[str, list[str]]] = field(default_factory=list)
     script: list[tuple[int, Any]] = field(default_factory=list)
     answer: Callable[[dict[str, Any]], dict[str, Any]] = lambda request: decision(request, "allow")
     url: str = ""
@@ -136,6 +138,17 @@ def serve() -> Iterator[FakePaidwen]:
             if self.path == "/v1/decisions":
                 fake.decisions.append(recorded)
                 self._reply(200, fake.answer(recorded.body))
+            elif self.path == "/v1/oauth/token":
+                fake.exchanges.append(parse_qs(recorded.body.decode()))
+                self._reply(
+                    200,
+                    {
+                        "access_token": f"agent-token-{len(fake.exchanges)}",
+                        "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                        "token_type": "Bearer",
+                        "expires_in": 900,
+                    },
+                )
             elif self.path == "/v1/traces":
                 fake.traces.append(recorded)
                 self.send_response(200)

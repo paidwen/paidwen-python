@@ -31,18 +31,30 @@ from ._contract import (
     Problem,
     Tool,
 )
+from ._credentials import (
+    Credentials,
+    FederatedCredentials,
+    IdentityToken,
+    KeyCredentials,
+    Unavailable,
+    identity_token_file,
+)
 from ._errors import DeniedError, PaidwenError, PendingError, RequestError, reason_of
 from ._journal import Journal, finish, quiet_call, started, trace_id, traceparent
 
 Fallback = Literal["allow", "block"]
 OnPending = Literal["wait", "raise"]
 
-VERSION = "0.8.1"
+VERSION = "0.9.0"
 DEFAULT_BASE_URL = "https://api.paidwen.com"
 QUOTA_EXCEEDED = "https://paidwen.com/problems/quota-exceeded"
 DEFAULT_TIMEOUT = 3.0
 SLOW_DOWN_SECONDS = 5
 WAIT_GRACE_SECONDS = 60
+MISSING_IDENTITY = (
+    "Paidwen needs an agent key or an identity token: pass api_key, identity_token_file or "
+    "identity_token, or set PAIDWEN_API_KEY or PAIDWEN_IDENTITY_TOKEN_FILE."
+)
 
 _CAPTURED = "_paidwen_captured"
 
@@ -83,6 +95,8 @@ class Paidwen:
         self,
         api_key: str | None = None,
         *,
+        identity_token_file: str | None = None,
+        identity_token: IdentityToken | None = None,
         base_url: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         on_unavailable: Fallback = "block",
@@ -91,9 +105,6 @@ class Paidwen:
         journal: bool = True,
         http_client: httpx.Client | None = None,
     ) -> None:
-        key = api_key or os.environ.get("PAIDWEN_API_KEY")
-        if not key:
-            raise PaidwenError("Paidwen needs an agent key: pass api_key or set PAIDWEN_API_KEY.")
         if on_unavailable not in ("allow", "block"):
             raise PaidwenError('on_unavailable must be "allow" or "block".')
         if on_pending not in ("wait", "raise"):
@@ -101,7 +112,6 @@ class Paidwen:
         if not timeout > 0:
             raise PaidwenError("timeout must be a positive number of seconds.")
         base = (base_url or os.environ.get("PAIDWEN_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
-        self._api_key = key
         self._base = base
         self._timeout = timeout
         self._on_unavailable: Fallback = on_unavailable
@@ -109,7 +119,12 @@ class Paidwen:
         self._on_wait = on_wait
         self._client = http_client or httpx.Client()
         self._owns_client = http_client is None
-        self._journal = Journal(f"{base}/v1/traces", key, journal, VERSION)
+        self._credentials = _credentials_of(
+            api_key, identity_token_file, identity_token, base, self._client, timeout
+        )
+        self._journal = Journal(
+            f"{base}/v1/traces", self._credentials.authorization, journal, VERSION
+        )
         self._release_http: Callable[[], None] | None = None
 
     def decide(
@@ -151,9 +166,13 @@ class Paidwen:
             request["context"] = cast(ActionContext, {**known, **(context or {})})
         return request
 
-    def _send(self, request: DecisionRequest, span: Span | None) -> Decision:
+    def _send(self, request: DecisionRequest, span: Span | None, retry: bool = True) -> Decision:
         self._journal.settle()
-        headers = {"authorization": f"Bearer {self._api_key}", "accept": "application/json"}
+        try:
+            authorization = self._credentials.authorization()
+        except Unavailable as error:
+            return self._fallback(request, error.message, error.reason)
+        headers = {"authorization": authorization, "accept": "application/json"}
         if span is not None:
             headers["traceparent"] = traceparent(span)
         try:
@@ -173,6 +192,9 @@ class Paidwen:
             return self._fallback(
                 request, _unavailable(response.status_code, problem), reason_of(problem)
             )
+        if response.status_code == 401 and retry and self._credentials.federated:
+            self._credentials.reject(authorization)
+            return self._send(request, span, False)
         if not response.is_success:
             raise RequestError(response.status_code, _problem(response))
         try:
@@ -181,21 +203,25 @@ class Paidwen:
             return self._fallback(request, "Paidwen did not answer", str(error))
         return cast(Decision, body)
 
-    def _poll(self, approval_id: str) -> tuple[str, ApprovalStatus | None]:
+    def _poll(self, approval_id: str, retry: bool = True) -> tuple[str, ApprovalStatus | None]:
+        try:
+            authorization = self._credentials.authorization()
+        except Unavailable:
+            return "unavailable", None
         try:
             response = quiet_call(
                 functools.partial(
                     self._client.get,
                     f"{self._base}/v1/approvals/{approval_id}",
-                    headers={
-                        "authorization": f"Bearer {self._api_key}",
-                        "accept": "application/json",
-                    },
+                    headers={"authorization": authorization, "accept": "application/json"},
                     timeout=self._timeout,
                 )
             )
         except httpx.HTTPError:
             return "unavailable", None
+        if response.status_code == 401 and retry and self._credentials.federated:
+            self._credentials.reject(authorization)
+            return self._poll(approval_id, False)
         if response.status_code == 429:
             return "slow_down", None
         if response.status_code >= 500:
@@ -539,6 +565,46 @@ class Paidwen:
             "observed": [],
             "decided_at": datetime.now(timezone.utc).isoformat(),
         }
+
+
+def _credentials_of(
+    api_key: str | None,
+    token_file: str | None,
+    identity_token: IdentityToken | None,
+    base: str,
+    client: httpx.Client,
+    timeout: float,
+) -> Credentials:
+    given = [value for value in (api_key, token_file, identity_token) if value is not None]
+    if len(given) > 1:
+        raise PaidwenError("Pass only one of api_key, identity_token_file and identity_token.")
+
+    def federated(source: IdentityToken) -> Credentials:
+        return FederatedCredentials(source, base, client, timeout)
+
+    if token_file is not None:
+        if not token_file:
+            raise PaidwenError("identity_token_file must name the file of the identity token.")
+        return federated(identity_token_file(token_file))
+    if identity_token is not None:
+        if not callable(identity_token):
+            raise PaidwenError("identity_token must be a function that returns the identity token.")
+        return federated(identity_token)
+    if api_key is not None:
+        if not api_key:
+            raise PaidwenError(MISSING_IDENTITY)
+        return KeyCredentials(api_key)
+    key = os.environ.get("PAIDWEN_API_KEY")
+    path = os.environ.get("PAIDWEN_IDENTITY_TOKEN_FILE")
+    if key and path:
+        raise PaidwenError(
+            "Both PAIDWEN_API_KEY and PAIDWEN_IDENTITY_TOKEN_FILE are set. Keep only one of them."
+        )
+    if key:
+        return KeyCredentials(key)
+    if path:
+        return federated(identity_token_file(path))
+    raise PaidwenError(MISSING_IDENTITY)
 
 
 def _problem(response: httpx.Response) -> Problem | None:

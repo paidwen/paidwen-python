@@ -14,6 +14,7 @@ from ._contract import (
     Problem,
     Tool,
 )
+from ._credentials import IdentityToken
 from ._errors import DeniedError, PaidwenError, PendingError, RequestError
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "DecisionRequest",
     "DeniedError",
     "Fallback",
+    "IdentityToken",
     "IncidentKind",
     "IncidentReference",
     "ObservedRule",
