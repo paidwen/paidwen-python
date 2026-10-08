@@ -37,7 +37,7 @@ from ._journal import Journal, finish, quiet_call, started, trace_id, traceparen
 Fallback = Literal["allow", "block"]
 OnPending = Literal["wait", "raise"]
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 DEFAULT_BASE_URL = "https://api.paidwen.com"
 QUOTA_EXCEEDED = "https://paidwen.com/problems/quota-exceeded"
 DEFAULT_TIMEOUT = 3.0

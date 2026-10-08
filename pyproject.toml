@@ -1,6 +1,6 @@
 [project]
 name = "paidwen"
-version = "0.8.0"
+version = "0.8.1"
 description = "Paidwen SDK: the agent asks Paidwen before each action and applies the answer."
 readme = "README.md"
 license = "Apache-2.0"
