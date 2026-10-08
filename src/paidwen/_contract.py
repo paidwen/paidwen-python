@@ -132,19 +132,6 @@ class BudgetPatch(TypedDict, closed=True):
     monthly_usd: NotRequired[float | None]
 
 
-class AgentCreate(TypedDict, closed=True):
-    name: str
-    owner: NotRequired[str]
-    team: NotRequired[str]
-    description: NotRequired[str]
-    model_provider: NotRequired[str]
-    environment: Environment
-    risk_level: NotRequired[RiskLevel]
-    labels: NotRequired[Labels]
-    budget: NotRequired[Budget]
-    record_content: NotRequired[bool]
-
-
 class AgentPatch(TypedDict, closed=True):
     name: NotRequired[str]
     owner: NotRequired[str | None]
@@ -261,6 +248,30 @@ class ApprovalGroupPatch(TypedDict, closed=True):
     expires_in: NotRequired[ExpiresIn]
     on_expiry: NotRequired[OnExpiry]
     default_for: NotRequired[list[WaitingVerdict]]
+
+
+TeamHandle: TypeAlias = str
+
+
+class Team(TypedDict, closed=True):
+    handle: TeamHandle
+    name: str
+    agents: int
+    created_at: str
+
+
+class TeamCreate(TypedDict, closed=True):
+    handle: TeamHandle
+    name: str
+
+
+class TeamPatch(TypedDict, closed=True):
+    name: NotRequired[str]
+
+
+class TeamList(TypedDict):
+    data: list[Team]
+    has_more: bool
 
 
 class ApprovalGroupList(TypedDict):
@@ -424,21 +435,6 @@ class ConformanceExpectation(TypedDict, closed=True):
     approval_expires_in: NotRequired[int]
     permission: NotRequired[PermissionOutcome]
     budget: NotRequired[BudgetOutcome]
-
-
-class ConformanceCase(TypedDict, closed=True):
-    """
-    One example of the conformance suite: an agent, its permissions and its budget, the approval groups and the rules of its organization, a request and the expected decision. The server and both SDKs must pass every case.
-    """
-
-    name: str
-    description: str
-    agent: AgentCreate
-    permissions: NotRequired[AgentPermissions]
-    approval_groups: NotRequired[list[ConformanceApprovalGroup]]
-    rules: list[ConformanceRule]
-    request: DecisionRequest
-    expected: ConformanceExpectation
 
 
 AgentStatus: TypeAlias = Literal["active", "quarantined", "disabled"]
@@ -812,7 +808,7 @@ class Agent(TypedDict, closed=True):
     id: str
     name: str
     owner: NotRequired[str]
-    team: NotRequired[str]
+    team: NotRequired[TeamHandle]
     description: NotRequired[str]
     model_provider: NotRequired[str]
     environment: Environment
@@ -824,6 +820,19 @@ class Agent(TypedDict, closed=True):
     spent: NotRequired[AgentSpent]
     created_at: str
     updated_at: str
+
+
+class AgentCreate(TypedDict, closed=True):
+    name: str
+    owner: NotRequired[str]
+    team: NotRequired[TeamHandle]
+    description: NotRequired[str]
+    model_provider: NotRequired[str]
+    environment: Environment
+    risk_level: NotRequired[RiskLevel]
+    labels: NotRequired[Labels]
+    budget: NotRequired[Budget]
+    record_content: NotRequired[bool]
 
 
 class AgentList(TypedDict):
@@ -883,3 +892,18 @@ class Snapshot(TypedDict, closed=True):
     approval_defaults: NotRequired[SnapshotApprovalDefaults]
     agents: list[SnapshotAgent]
     rules: list[SnapshotRule]
+
+
+class ConformanceCase(TypedDict, closed=True):
+    """
+    One example of the conformance suite: an agent, its permissions and its budget, the approval groups and the rules of its organization, a request and the expected decision. The server and both SDKs must pass every case.
+    """
+
+    name: str
+    description: str
+    agent: AgentCreate
+    permissions: NotRequired[AgentPermissions]
+    approval_groups: NotRequired[list[ConformanceApprovalGroup]]
+    rules: list[ConformanceRule]
+    request: DecisionRequest
+    expected: ConformanceExpectation
