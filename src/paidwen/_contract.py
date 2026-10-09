@@ -267,6 +267,7 @@ class Rule(TypedDict, closed=True):
     verdict: Verdict
     mode: RuleMode
     approval_group_id: NotRequired[str]
+    source_text: NotRequired[str]
     created_at: str
     updated_at: str
 
@@ -277,6 +278,45 @@ class RuleCreate(TypedDict, closed=True):
     verdict: Verdict
     mode: RuleMode
     approval_group_id: NotRequired[str]
+    source_text: NotRequired[str]
+
+
+class DraftRequest(TypedDict, closed=True):
+    text: str
+    agent_id: NotRequired[str]
+
+
+DraftKind: TypeAlias = Literal["rule", "permissions", "budget"]
+
+
+class DraftAgentCount(TypedDict):
+    agent_id: str
+    name: str
+    matched: int
+
+
+class DraftToolCount(TypedDict):
+    name: str
+    matched: int
+
+
+class DraftExample(TypedDict):
+    action_id: str
+    decided_at: str
+    agent_id: str
+    agent_name: str
+    tool_name: str
+    verdict: Verdict
+
+
+class DraftDay(TypedDict):
+    day: str
+    spent_usd: float
+
+
+class DraftWarning(TypedDict):
+    code: Literal["broad", "never", "absent_field", "unknown_tool", "incomplete"]
+    text: str
 
 
 class RulePatch(TypedDict, closed=True):
@@ -285,6 +325,7 @@ class RulePatch(TypedDict, closed=True):
     verdict: NotRequired[Verdict]
     mode: NotRequired[RuleMode]
     approval_group_id: NotRequired[str | None]
+    source_text: NotRequired[str | None]
 
 
 class RuleList(TypedDict):
@@ -1046,6 +1087,23 @@ class TrustRuleList(TypedDict):
     has_more: bool
 
 
+DraftPreview = TypedDict(
+    "DraftPreview",
+    {
+        "from": str,
+        "to": str,
+        "scanned": int,
+        "matched": int,
+        "failed": int,
+        "truncated": bool,
+        "agents": list[DraftAgentCount],
+        "tools": list[DraftToolCount],
+        "examples": list[DraftExample],
+        "days": NotRequired[list[DraftDay]],
+    },
+)
+
+
 class ApprovalGroupCreate(TypedDict, closed=True):
     name: str
     members: list[Member]
@@ -1139,3 +1197,17 @@ class SessionStepList(TypedDict):
     session_id: str
     data: list[SessionStep]
     has_more: bool
+
+
+class Draft(TypedDict):
+    kind: DraftKind
+    text: str
+    rule: NotRequired[RuleCreate]
+    agent_id: NotRequired[str]
+    permissions: NotRequired[AgentPermissions]
+    current_permissions: NotRequired[AgentPermissions]
+    budget: NotRequired[Budget]
+    reading: str
+    complete: bool
+    preview: DraftPreview
+    warnings: list[DraftWarning]
