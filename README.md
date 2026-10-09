@@ -62,6 +62,21 @@ paidwen.mcp(ClientSession)
 
 `paidwen.mcp(session)` captures one session only, for a process that runs several agents with their own keys. `mcp()` returns a function that removes the capture.
 
+## The called agent learns which agent calls it
+
+Each decision names the agent, and the SDK keeps its identifier. During each tool call, the active OpenTelemetry context carries the W3C baggage entry `paidwen.agent.id` with this identifier, next to the rest of your baggage. The SDK adds the `traceparent` and `baggage` headers to each HTTP call it captures, and the same two values to the `params._meta` of each MCP call it captures, as the OpenTelemetry conventions for MCP ask. It never replaces a header or a value that the call already carries. An HTTP call made inside a tool also receives the headers of the tool, without a new decision, unless its host matches the `ignore` option.
+
+The SDK of the called agent reads `paidwen.agent.id` in the baggage of the active context, and sends it with each decision as `context.caller_agent_id`. The map of Paidwen then shows which agent calls which. The OpenTelemetry instrumentation of your server puts this baggage in the context. Without it, pass the received headers to the context:
+
+```python
+with paidwen.context(headers=request.headers):
+    handle(request)
+```
+
+`headers` takes a mapping of the received headers, or the `_meta` of a received MCP request. The SDK reads `traceparent` and `baggage` with the W3C propagators of OpenTelemetry, and the tool calls of the block join the trace of the caller.
+
+The entry `paidwen.agent.id` holds only the identifier of the agent, which opens nothing without the key of the agent. The baggage of the context leaves with each captured call, including the calls to third parties.
+
 ## An action can wait for a human approval
 
 ```python

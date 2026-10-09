@@ -6,7 +6,17 @@ from typing import Any
 
 import anyio
 import pytest
-from fake import APPROVAL_ID, DISABLED, FakePaidwen, serve, status, waiting
+from fake import (
+    APPROVAL_ID,
+    CALLER_ID,
+    CLIENT_TRACEPARENT,
+    DISABLED,
+    FakePaidwen,
+    decision,
+    serve,
+    status,
+    waiting,
+)
 
 from paidwen import DeniedError, Paidwen, PendingError, RequestError, Wait
 
@@ -210,6 +220,29 @@ def test_the_context_gives_its_action_to_the_first_decision_and_its_session_to_a
     assert second["action_id"] != first["action_id"]
     assert first["context"]["session_id"] == "s-1"
     assert second["context"]["session_id"] == "s-1"
+
+
+def test_the_context_gives_the_caller_and_the_trace_of_the_received_headers(
+    fake: FakePaidwen,
+) -> None:
+    fake.answer = lambda request: decision(request, "allow")
+    paidwen = client(fake)
+
+    @paidwen.tool("search")
+    def search() -> None:
+        return None
+
+    received = {
+        "Traceparent": CLIENT_TRACEPARENT,
+        "baggage": f"paidwen.agent.id={CALLER_ID},tenant=acme",
+    }
+    with paidwen.context(headers=received):
+        paidwen.decide(tool={"name": "a", "kind": "function"})
+        search()
+    paidwen.decide(tool={"name": "b", "kind": "function"})
+    sent = [recorded.body.get("context", {}) for recorded in fake.decisions]
+    assert [context.get("caller_agent_id") for context in sent] == [CALLER_ID, CALLER_ID, None]
+    assert sent[1]["trace_id"] == CLIENT_TRACEPARENT.split("-")[1]
 
 
 def test_a_tool_call_sends_its_trace(fake: FakePaidwen) -> None:

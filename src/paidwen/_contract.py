@@ -657,6 +657,39 @@ class SessionModelCall(TypedDict):
     output: NotRequired[list[ModelMessage]]
 
 
+MapPeriod: TypeAlias = Literal["24h", "7d", "30d"]
+
+
+class MapNode(TypedDict):
+    id: str
+    kind: Literal["agent", "server", "tool"]
+    name: str
+    agent_id: NotRequired[str]
+    actions: int
+
+
+class MapEdge(TypedDict):
+    source: str
+    target: str
+    tools: list[str]
+    actions: int
+    allowed: int
+    waited: int
+    blocked: int
+    errors: int
+    cost_usd: float
+    last_at: str
+
+
+class AgentMap(TypedDict):
+    period_start: str
+    period_end: str
+    environment: Environment
+    nodes: list[MapNode]
+    edges: list[MapEdge]
+    hidden_agents: int
+
+
 class ActionList(TypedDict):
     data: list[Action]
     has_more: bool
@@ -932,6 +965,7 @@ class Approval(TypedDict):
 
 class Decision(TypedDict):
     action_id: str
+    agent_id: NotRequired[str]
     verdict: Verdict
     rule_id: str | None
     observed: list[ObservedRule]

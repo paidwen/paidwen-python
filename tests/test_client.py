@@ -9,7 +9,8 @@ from typing import Any
 
 import httpx
 import pytest
-from fake import DISABLED
+from fake import AGENT_ID, CALLER_ID, DISABLED, carrying
+from opentelemetry import baggage
 
 from paidwen import (
     Decision,
@@ -208,6 +209,23 @@ def test_a_quota_exceeded_applies_on_unavailable_and_names_the_cause(
     ]
 
 
+def test_decide_sends_the_caller_that_the_baggage_names_and_never_its_own_agent() -> None:
+    requests: list[httpx.Request] = []
+    paidwen = client(server(200, {**decision("allow"), "agent_id": AGENT_ID}, requests))
+    for named in (CALLER_ID, AGENT_ID, CALLER_ID, "a" * 65):
+        with carrying({"paidwen.agent.id": named}):
+            paidwen.decide(tool={"name": "x", "kind": "function"})
+    paidwen.decide(tool={"name": "x", "kind": "function"})
+    sent = [json.loads(request.content).get("context", {}) for request in requests]
+    assert [context.get("caller_agent_id") for context in sent] == [
+        CALLER_ID,
+        None,
+        CALLER_ID,
+        None,
+        None,
+    ]
+
+
 def test_the_warning_repeats_the_problem_of_a_server_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -244,6 +262,28 @@ def test_tool_runs_the_function_when_paidwen_allows_it() -> None:
         "reason": "lost parcel",
         "channel": "email",
     }
+
+
+def test_tool_keeps_the_agent_of_the_client_and_puts_it_in_the_baggage_of_each_tool() -> None:
+    answers = [{**decision("allow"), "agent_id": AGENT_ID}, decision("allow"), decision("allow")]
+    paidwen = client(lambda request: httpx.Response(200, json=answers.pop(0)))
+    paidwen.decide(tool={"name": "a", "kind": "function"})
+
+    @paidwen.tool("search")
+    def search() -> dict[str, object]:
+        return dict(baggage.get_all())
+
+    @paidwen.tool("search.async")
+    async def search_async() -> dict[str, object]:
+        return dict(baggage.get_all())
+
+    with carrying({"tenant": "acme"}):
+        inside = search()
+        inside_async = asyncio.run(search_async())
+    expected = {"tenant": "acme", "paidwen.agent.id": AGENT_ID}
+    assert inside == expected
+    assert inside_async == expected
+    assert dict(baggage.get_all()) == {}
 
 
 def test_tool_sends_the_cost_that_the_agent_estimates() -> None:

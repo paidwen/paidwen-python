@@ -11,9 +11,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs
 
+from opentelemetry import baggage
+from opentelemetry import context as otel_context
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 APPROVAL_ID = "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a"
+AGENT_ID = "4b0f3a52-8c1d-4e7a-9f26-1d5c7b9e3a40"
+CALLER_ID = "9e2d4c61-7a3b-4f58-8e10-6c2a9b4d7f13"
+CLIENT_TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 DISABLED = {
     "type": "https://paidwen.com/problems/agent-disabled",
     "title": "The agent is disabled.",
@@ -176,6 +181,22 @@ def serve() -> Iterator[FakePaidwen]:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def parent(traceparent: str | None) -> str | None:
+    return None if traceparent is None else "-".join(traceparent.split("-")[1:3])
+
+
+@contextmanager
+def carrying(entries: dict[str, str]) -> Iterator[None]:
+    otel = otel_context.get_current()
+    for key, value in entries.items():
+        otel = baggage.set_baggage(key, value, otel)
+    token = otel_context.attach(otel)
+    try:
+        yield
+    finally:
+        otel_context.detach(token)
 
 
 def until(what: str, done: Callable[[], bool], limit: float = 10.0) -> None:

@@ -6,8 +6,8 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import TracebackType
@@ -22,6 +22,7 @@ from opentelemetry.sdk.trace import SpanProcessor
 from opentelemetry.trace import Span
 
 from . import _context
+from ._context import Carrier
 from ._contract import (
     ActionContext,
     ApprovalStatus,
@@ -126,6 +127,7 @@ class Paidwen:
             f"{base}/v1/traces", self._credentials.authorization, journal, VERSION
         )
         self._release_http: Callable[[], None] | None = None
+        self._agent_id: str | None = None
 
     def decide(
         self,
@@ -162,6 +164,9 @@ class Paidwen:
             known["session_id"] = session
         if span is not None:
             known["trace_id"] = trace_id(span)
+        caller = _context.caller(self._agent_id)
+        if caller is not None:
+            known["caller_agent_id"] = caller
         if known or context is not None:
             request["context"] = cast(ActionContext, {**known, **(context or {})})
         return request
@@ -201,6 +206,8 @@ class Paidwen:
             body = response.json()
         except ValueError as error:
             return self._fallback(request, "Paidwen did not answer", str(error))
+        if isinstance(body, dict) and isinstance(body.get("agent_id"), str) and body["agent_id"]:
+            self._agent_id = body["agent_id"]
         return cast(Decision, body)
 
     def _poll(self, approval_id: str, retry: bool = True) -> tuple[str, ApprovalStatus | None]:
@@ -379,11 +386,18 @@ class Paidwen:
         span.set_attribute("http.response.status_code", code)
         finish(span, _HttpStatusError(str(code)) if code >= 400 else None)
 
+    @contextmanager
+    def _inside(self, span: Span) -> Iterator[Carrier]:
+        tool = _context.tool_context(self._agent_id)
+        carrier = _context.propagated(tool, span)
+        with _context.inside_action(tool, carrier):
+            yield carrier
+
     def _run(
         self,
         tool: Tool,
         params: Mapping[str, Any] | None,
-        action: Callable[[], R],
+        action: Callable[[Carrier], R],
         status_of: Callable[[Any], int] | None = None,
         cost: Cost | None = None,
     ) -> R:
@@ -391,8 +405,8 @@ class Paidwen:
         try:
             self._authorize(tool, params, cost, span)
             started(span)
-            with _context.inside_action():
-                result = action()
+            with self._inside(span) as carrier:
+                result = action(carrier)
         except BaseException as error:
             finish(span, error)
             raise
@@ -403,7 +417,7 @@ class Paidwen:
         self,
         tool: Tool,
         params: Mapping[str, Any] | None,
-        action: Callable[[], Awaitable[R]],
+        action: Callable[[Carrier], Awaitable[R]],
         status_of: Callable[[Any], int] | None = None,
         cost: Cost | None = None,
     ) -> R:
@@ -411,8 +425,8 @@ class Paidwen:
         try:
             await self._authorize_async(tool, params, cost, span)
             started(span)
-            with _context.inside_action():
-                result = await action()
+            with self._inside(span) as carrier:
+                result = await action(carrier)
         except BaseException as error:
             finish(span, error)
             raise
@@ -428,6 +442,18 @@ class Paidwen:
         if otel_context.get_value(_SUPPRESS_INSTRUMENTATION_KEY):
             return True
         return ignored(ignore, server)
+
+    def passing(self, server: str, ignore: Sequence[str]) -> Carrier | None:
+        from ._http import ignored, server_of
+
+        current = _context.scope()
+        if not current.in_action or current.silenced:
+            return None
+        if otel_context.get_value(_SUPPRESS_INSTRUMENTATION_KEY):
+            return None
+        if server == server_of(self._base) or ignored(ignore, server):
+            return None
+        return current.carrier
 
     def tool(
         self,
@@ -450,7 +476,7 @@ class Paidwen:
                     return await self._run_async(
                         tool,
                         params,
-                        lambda: function(*args, **kwargs),
+                        lambda carrier: function(*args, **kwargs),
                         cost=estimate(params),
                     )
 
@@ -460,7 +486,7 @@ class Paidwen:
             def run(*args: Any, **kwargs: Any) -> Any:
                 params = _params(signature, args, kwargs)
                 return self._run(
-                    tool, params, lambda: function(*args, **kwargs), cost=estimate(params)
+                    tool, params, lambda carrier: function(*args, **kwargs), cost=estimate(params)
                 )
 
             return cast(F, run)
@@ -468,9 +494,12 @@ class Paidwen:
         return decorate
 
     def context(
-        self, action_id: str | None = None, session_id: str | None = None
+        self,
+        action_id: str | None = None,
+        session_id: str | None = None,
+        headers: Mapping[str, Any] | None = None,
     ) -> AbstractContextManager[None]:
-        return _context.context(action_id=action_id, session_id=session_id)
+        return _context.context(action_id=action_id, session_id=session_id, headers=headers)
 
     def mcp(self, target: Any) -> Callable[[], None]:
         send = getattr(target, "send_request", None)
@@ -489,7 +518,11 @@ class Paidwen:
                 call = _tool_call(session, request)
                 if call is None:
                     return await send(session, request, *args, **kwargs)
-                return await run(call[0], call[1], lambda: send(session, request, *args, **kwargs))
+                return await run(
+                    call[0],
+                    call[1],
+                    lambda carrier: send(session, _with_meta(request, carrier), *args, **kwargs),
+                )
 
             wrapped = functools.wraps(send)(send_class)
         else:
@@ -498,7 +531,11 @@ class Paidwen:
                 call = _tool_call(target, request)
                 if call is None:
                     return await send(request, *args, **kwargs)
-                return await run(call[0], call[1], lambda: send(request, *args, **kwargs))
+                return await run(
+                    call[0],
+                    call[1],
+                    lambda carrier: send(_with_meta(request, carrier), *args, **kwargs),
+                )
 
             wrapped = functools.wraps(send)(send_session)
         target.send_request = wrapped
@@ -647,9 +684,28 @@ def _params(
     return params
 
 
-def _tool_call(session: Any, request: Any) -> tuple[Tool, dict[str, Any]] | None:
+def _dumped(request: Any) -> Any:
     dump = getattr(request, "model_dump", None)
-    data = dump(by_alias=True, mode="json", exclude_none=True) if callable(dump) else request
+    return dump(by_alias=True, mode="json", exclude_none=True) if callable(dump) else request
+
+
+def _with_meta(request: Any, carrier: Carrier) -> Any:
+    data = _dumped(request)
+    params = data.get("params") if isinstance(data, Mapping) else None
+    if not isinstance(params, Mapping):
+        return request
+    meta = params.get("_meta")
+    present: Mapping[str, Any] = meta if isinstance(meta, Mapping) else {}
+    added = _context.missing(carrier, lambda name: name in present)
+    if not added:
+        return request
+    changed = {**data, "params": {**params, "_meta": {**present, **added}}}
+    validate = getattr(type(request), "model_validate", None)
+    return validate(changed) if callable(validate) else changed
+
+
+def _tool_call(session: Any, request: Any) -> tuple[Tool, dict[str, Any]] | None:
+    data = _dumped(request)
     if not isinstance(data, Mapping) or data.get("method") != "tools/call":
         return None
     params = data.get("params")

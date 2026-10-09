@@ -5,27 +5,16 @@ import json
 import threading
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
 
+from ._context import Carrier, missing
 from ._errors import PaidwenError
-from ._http import MAX_BODY_BYTES, body_of, describe, entries
+from ._http import MAX_BODY_BYTES, body_of, describe, entries, server_of
 
 if TYPE_CHECKING:
     from ._client import Paidwen
 
 _lock = threading.Lock()
 _installed = False
-
-
-def _server(url: str) -> str:
-    parts = urlsplit(url)
-    host = parts.hostname or ""
-    default = (parts.scheme == "http" and parts.port == 80) or (
-        parts.scheme == "https" and parts.port == 443
-    )
-    if parts.port is not None and not default:
-        return f"{host}:{parts.port}"
-    return host
 
 
 def _header(headers: Any, name: str) -> str | None:
@@ -40,6 +29,16 @@ def _header(headers: Any, name: str) -> str | None:
             if isinstance(key, str) and key.lower() == name.lower():
                 return str(candidate)
     return None if value is None else str(value)
+
+
+def _pairs(headers: Any) -> list[tuple[Any, Any]]:
+    if headers is None:
+        return []
+    return list(headers.items() if callable(getattr(headers, "items", None)) else headers)
+
+
+def _names(*headers: Any) -> set[str]:
+    return {str(name).lower() for given in headers for name, _ in _pairs(given)}
 
 
 def _httpx(paidwen: Paidwen, ignore: tuple[str, ...]) -> Callable[[], None] | None:
@@ -61,31 +60,50 @@ def _httpx(paidwen: Paidwen, ignore: tuple[str, ...]) -> Callable[[], None] | No
 
     def call(request: Any) -> tuple[Any, Any] | None:
         url = str(request.url)
-        if paidwen.skips(_server(url), ignore):
+        if paidwen.skips(server_of(url), ignore):
             return None
         return describe(
             request.method, url, body_of(content(request), request.headers.get("content-type"))
         )
 
+    def propagated(request: Any, carrier: Carrier | None) -> Any:
+        if carrier is None:
+            return request
+        added = missing(carrier, lambda name: name in request.headers)
+        if not added:
+            return request
+        headers = request.headers.copy()
+        headers.update(added)
+        return httpx.Request(
+            request.method,
+            request.url,
+            headers=headers,
+            stream=request.stream,
+            extensions=request.extensions,
+        )
+
+    def passed(request: Any) -> Any:
+        return propagated(request, paidwen.passing(server_of(str(request.url)), ignore))
+
     def handle_request(transport: Any, request: Any) -> Any:
         described = call(request)
         if described is None:
-            return original_sync(transport, request)
+            return original_sync(transport, passed(request))
         return paidwen._run(
             described[0],
             described[1],
-            lambda: original_sync(transport, request),
+            lambda carrier: original_sync(transport, propagated(request, carrier)),
             lambda response: response.status_code,
         )
 
     async def handle_async_request(transport: Any, request: Any) -> Any:
         described = call(request)
         if described is None:
-            return await original_async(transport, request)
+            return await original_async(transport, passed(request))
         return await paidwen._run_async(
             described[0],
             described[1],
-            lambda: original_async(transport, request),
+            lambda carrier: original_async(transport, propagated(request, carrier)),
             lambda response: response.status_code,
         )
 
@@ -125,14 +143,25 @@ def _urllib3(paidwen: Paidwen, ignore: tuple[str, ...]) -> Callable[[], None] | 
             )
             host = pool.host if default else f"{pool.host}:{port}"
             full = f"{pool.scheme}://{host}{url}"
-        if paidwen.skips(_server(full), ignore):
-            return original(pool, method, url, body, headers, *args, **kwargs)
+        server = server_of(full)
+
+        def sent(carrier: Carrier | None) -> Any:
+            if carrier is None:
+                return headers
+            given = pool.headers if headers is None else headers
+            names = _names(given)
+            added = missing(carrier, lambda name: name in names)
+            return {**given, **added} if added else headers
+
+        if paidwen.skips(server, ignore):
+            passing = paidwen.passing(server, ignore)
+            return original(pool, method, url, body, sent(passing), *args, **kwargs)
         data = body if isinstance(body, (bytes, str)) else None
         tool, params = describe(method, full, body_of(data, _header(headers, "Content-Type")))
         return paidwen._run(
             tool,
             params,
-            lambda: original(pool, method, url, body, headers, *args, **kwargs),
+            lambda carrier: original(pool, method, url, body, sent(carrier), *args, **kwargs),
             lambda response: response.status,
         )
 
@@ -169,13 +198,26 @@ def _aiohttp(paidwen: Paidwen, ignore: tuple[str, ...]) -> Callable[[], None] | 
         if kwargs.get("params"):
             url = url.update_query(kwargs["params"])
         full = str(url)
-        if paidwen.skips(_server(full), ignore):
-            return await original(session, method, str_or_url, *args, **kwargs)
+        server = server_of(full)
+
+        def sent(carrier: Carrier | None) -> dict[str, Any]:
+            if carrier is None:
+                return kwargs
+            given = kwargs.get("headers")
+            names = _names(given, getattr(session, "headers", None))
+            added = missing(carrier, lambda name: name in names)
+            if not added:
+                return kwargs
+            return {**kwargs, "headers": [*_pairs(given), *added.items()]}
+
+        if paidwen.skips(server, ignore):
+            passing = paidwen.passing(server, ignore)
+            return await original(session, method, str_or_url, *args, **sent(passing))
         tool, params = describe(method, full, body(kwargs))
         return await paidwen._run_async(
             tool,
             params,
-            lambda: original(session, method, str_or_url, *args, **kwargs),
+            lambda carrier: original(session, method, str_or_url, *args, **sent(carrier)),
             lambda response: response.status,
         )
 

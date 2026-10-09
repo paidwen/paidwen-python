@@ -14,7 +14,16 @@ import httpx
 import pytest
 import requests
 import urllib3
-from fake import DISABLED, FakePaidwen, decision, serve
+from fake import (
+    AGENT_ID,
+    CALLER_ID,
+    CLIENT_TRACEPARENT,
+    DISABLED,
+    FakePaidwen,
+    decision,
+    parent,
+    serve,
+)
 
 from paidwen import DeniedError, Paidwen, PaidwenError, RequestError
 
@@ -23,6 +32,7 @@ from paidwen import DeniedError, Paidwen, PaidwenError, RequestError
 class Api:
     url: str = ""
     received: list[tuple[str, str, bytes]] = field(default_factory=list)
+    headers: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def host(self) -> str:
@@ -41,6 +51,7 @@ def api() -> Iterator[Api]:
             length = int(self.headers.get("content-length") or 0)
             body = self.rfile.read(length) if length else b""
             state.received.append((self.command, self.path, body))
+            state.headers.append({key.lower(): value for key, value in self.headers.items()})
             data = b'{"refund":"re_1"}'
             self.send_response(404 if self.path.startswith("/missing") else 200)
             self.send_header("content-type", "application/json")
@@ -88,6 +99,13 @@ def asked(fake: FakePaidwen) -> list[dict[str, Any]]:
     return [recorded.body for recorded in fake.decisions]
 
 
+def propagated(api: Api) -> list[tuple[str, str | None, str | None]]:
+    return [
+        (path, parent(headers.get("traceparent")), headers.get("baggage"))
+        for (_, path, _), headers in zip(api.received, api.headers, strict=True)
+    ]
+
+
 def test_httpx_asks_before_the_call_and_reads_it_as_a_tool(
     api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
 ) -> None:
@@ -119,6 +137,151 @@ def test_httpx_asks_before_the_call_and_reads_it_as_a_tool(
         },
     }
     assert "sk_live_secret" not in json.dumps(question)
+
+
+def test_a_captured_call_carries_the_trace_and_the_baggage_of_its_tool(
+    api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
+) -> None:
+    fake.answer = lambda request: decision(request, "allow", agent_id=AGENT_ID)
+    capture()
+    httpx.get(f"{api.url}/v1/httpx")
+    requests.get(f"{api.url}/v1/requests")
+    urllib3.request("GET", f"{api.url}/v1/urllib3")
+
+    async def call() -> None:
+        async with httpx.AsyncClient() as client:
+            await client.get(f"{api.url}/v1/async")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{api.url}/v1/aiohttp") as response:
+                await response.read()
+            async with session.get(
+                f"{api.url}/v1/kept", headers=[("Baggage", "tenant=acme")]
+            ) as response:
+                await response.read()
+
+    anyio.run(call)
+    httpx.get(
+        f"{api.url}/v1/kept",
+        headers={"Traceparent": CLIENT_TRACEPARENT, "baggage": "tenant=acme"},
+    )
+    requests.get(f"{api.url}/v1/kept", headers={"BAGGAGE": "tenant=acme"})
+    urllib3.request("GET", f"{api.url}/v1/kept", headers={"traceparent": CLIENT_TRACEPARENT})
+    decided = [parent(recorded.headers["traceparent"]) for recorded in fake.decisions]
+    client = parent(CLIENT_TRACEPARENT)
+    own = f"paidwen.agent.id={AGENT_ID}"
+    assert propagated(api) == [
+        ("/v1/httpx", decided[0], own),
+        ("/v1/requests", decided[1], own),
+        ("/v1/urllib3", decided[2], own),
+        ("/v1/async", decided[3], own),
+        ("/v1/aiohttp", decided[4], own),
+        ("/v1/kept", decided[5], "tenant=acme"),
+        ("/v1/kept", client, "tenant=acme"),
+        ("/v1/kept", decided[7], "tenant=acme"),
+        ("/v1/kept", client, own),
+    ]
+    assert len(set(decided)) == 9
+
+
+def test_a_call_inside_a_tool_carries_the_trace_and_the_baggage_of_the_tool(
+    api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
+) -> None:
+    fake.answer = lambda request: decision(request, "allow", agent_id=AGENT_ID)
+    paidwen = capture()
+
+    @paidwen.tool("billing.ask")
+    def ask() -> None:
+        httpx.get(f"{api.url}/v1/httpx")
+        requests.get(f"{api.url}/v1/requests")
+        urllib3.request("GET", f"{api.url}/v1/urllib3")
+        httpx.get(f"{api.url}/v1/kept", headers={"traceparent": CLIENT_TRACEPARENT})
+
+    @paidwen.tool("billing.ask.async")
+    async def ask_async() -> None:
+        async with httpx.AsyncClient() as client:
+            await client.get(f"{api.url}/v1/async")
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(f"{api.url}/v1/aiohttp") as response,
+        ):
+            await response.read()
+
+    ask()
+    anyio.run(ask_async)
+    tools = [parent(recorded.headers["traceparent"]) for recorded in fake.decisions]
+    own = f"paidwen.agent.id={AGENT_ID}"
+    assert len(tools) == 2
+    assert propagated(api) == [
+        ("/v1/httpx", tools[0], own),
+        ("/v1/requests", tools[0], own),
+        ("/v1/urllib3", tools[0], own),
+        ("/v1/kept", parent(CLIENT_TRACEPARENT), own),
+        ("/v1/async", tools[1], own),
+        ("/v1/aiohttp", tools[1], own),
+    ]
+
+
+def test_a_call_inside_a_tool_toward_an_ignored_host_carries_nothing(
+    api: Api, fake: FakePaidwen, capture: Callable[..., Paidwen]
+) -> None:
+    fake.answer = lambda request: decision(request, "allow", agent_id=AGENT_ID)
+    paidwen = capture(ignore=("127.0.0.*",))
+
+    @paidwen.tool("search")
+    def search() -> None:
+        httpx.get(f"{api.url}/v1/httpx")
+        requests.get(f"{api.url}/v1/requests")
+
+    search()
+    assert len(fake.decisions) == 1
+    assert propagated(api) == [("/v1/httpx", None, None), ("/v1/requests", None, None)]
+
+
+def test_an_agent_called_from_a_tool_of_another_agent_sends_its_caller(fake: FakePaidwen) -> None:
+    agents = {"Bearer key-a": CALLER_ID, "Bearer key-b": AGENT_ID}
+    fake.answer = lambda request: decision(
+        request, "allow", agent_id=agents[fake.decisions[-1].headers["authorization"]]
+    )
+    billing = Paidwen("key-b", base_url=fake.url, journal=False)
+
+    @billing.tool("refunds.create")
+    def refund() -> str:
+        return "re_1"
+
+    class Service(BaseHTTPRequestHandler):
+        def log_message(self, *args: Any) -> None:
+            return
+
+        def do_GET(self) -> None:
+            with billing.context(headers=self.headers):
+                data = refund().encode()
+            self.send_response(200)
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    service = ThreadingHTTPServer(("127.0.0.1", 0), Service)
+    threading.Thread(target=service.serve_forever, daemon=True).start()
+    triage = Paidwen("key-a", base_url=fake.url, journal=False)
+    triage.http()
+
+    @triage.tool("billing.ask")
+    def ask() -> str:
+        return httpx.get(f"http://127.0.0.1:{service.server_address[1]}/ask").text
+
+    try:
+        assert ask() == "re_1"
+    finally:
+        triage.close()
+        billing.close()
+        service.shutdown()
+        service.server_close()
+    asked, refunded = fake.decisions
+    assert asked.headers["authorization"] == "Bearer key-a"
+    assert "caller_agent_id" not in asked.body["context"]
+    assert refunded.headers["authorization"] == "Bearer key-b"
+    assert refunded.body["context"]["caller_agent_id"] == CALLER_ID
+    assert refunded.body["context"]["trace_id"] == asked.body["context"]["trace_id"]
 
 
 def test_a_refused_httpx_call_is_never_sent(

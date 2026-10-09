@@ -98,6 +98,17 @@ def body_of(content: bytes | str | None, content_type: str | None) -> Any:
     return None
 
 
+def server_of(url: str) -> str:
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    default = (parts.scheme == "http" and parts.port == 80) or (
+        parts.scheme == "https" and parts.port == 443
+    )
+    if parts.port is not None and not default:
+        return f"{host}:{parts.port}"
+    return host
+
+
 def describe(method: str, url: str, body: Any = None) -> tuple[Tool, dict[str, Any]]:
     parts = urlsplit(url)
     host = parts.hostname or ""

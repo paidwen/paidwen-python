@@ -5,9 +5,10 @@ from typing import Any
 import anyio
 import httpx
 import pytest
+from fake import AGENT_ID, CLIENT_TRACEPARENT, parent
 from mcp import ClientSession
 from mcp.client.client import Client
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from paidwen import DeniedError, Paidwen, PaidwenError, PendingError
 
@@ -72,6 +73,63 @@ def test_mcp_asks_before_each_tool_call_of_every_session() -> None:
         }
     ]
     assert served == ["4821"]
+
+
+def test_mcp_puts_the_trace_and_the_baggage_of_the_tool_in_the_meta_of_the_call() -> None:
+    decided: list[str] = []
+    metas: list[dict[str, Any]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        decided.append(request.headers["traceparent"])
+        body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "action_id": body["action_id"],
+                "agent_id": AGENT_ID,
+                "verdict": "allow",
+                "rule_id": None,
+                "observed": [],
+                "decided_at": "2026-10-05T09:00:00Z",
+            },
+        )
+
+    server = MCPServer("payments")
+
+    @server.tool()
+    def refund(ctx: Context, order: str = "") -> str:
+        metas.append(dict(ctx.request_context.meta or {}))
+        return "refunded"
+
+    paidwen = Paidwen(
+        "pw_test_key",
+        base_url="https://api.example.test",
+        http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+        journal=False,
+    )
+    release = paidwen.mcp(ClientSession)
+    try:
+
+        async def call() -> None:
+            async with Client(server) as client:
+                await client.call_tool("refund", {"order": "4821"})
+                await client.call_tool(
+                    "refund",
+                    {"order": "4822"},
+                    meta={"traceparent": CLIENT_TRACEPARENT, "tenant": "acme"},
+                )
+
+        run(call)
+    finally:
+        release()
+    own = f"paidwen.agent.id={AGENT_ID}"
+    first, second = metas
+    assert (parent(first["traceparent"]), first["baggage"]) == (parent(decided[0]), own)
+    assert (second["traceparent"], second["tenant"], second["baggage"]) == (
+        CLIENT_TRACEPARENT,
+        "acme",
+        own,
+    )
 
 
 @pytest.mark.parametrize(
