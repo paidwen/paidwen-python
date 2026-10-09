@@ -483,6 +483,14 @@ class AuditExecution(TypedDict):
     error_type: NotRequired[str]
 
 
+class EvidenceKey(TypedDict):
+    key_id: str
+    algorithm: Literal["RS256"]
+    public_key: str
+    created_at: str
+    retires_at: NotRequired[str]
+
+
 class RiskReason(TypedDict):
     code: str
     level: RiskLevel
@@ -1094,6 +1102,10 @@ class ApprovalGroupCreate(TypedDict, closed=True):
     expires_in: NotRequired[int]
     on_expiry: NotRequired[Literal["deny", "allow"]]
     default_for: NotRequired[list[WaitingVerdict]]
+
+
+class EvidenceKeyList(TypedDict):
+    data: list[EvidenceKey]
 
 
 class AuditRecord(TypedDict):
