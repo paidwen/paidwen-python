@@ -306,6 +306,7 @@ class ApprovalGroup(TypedDict, closed=True):
     name: str
     members: list[Member]
     slack_channel: NotRequired[str]
+    teams_webhook_host: NotRequired[str]
     expires_in: ExpiresIn
     on_expiry: OnExpiry
     default_for: list[WaitingVerdict]
@@ -313,22 +314,17 @@ class ApprovalGroup(TypedDict, closed=True):
     updated_at: str
 
 
-class ApprovalGroupCreate(TypedDict, closed=True):
-    name: str
-    members: list[Member]
-    slack_channel: NotRequired[str]
-    expires_in: NotRequired[int]
-    on_expiry: NotRequired[Literal["deny", "allow"]]
-    default_for: NotRequired[list[WaitingVerdict]]
-
-
 class ApprovalGroupPatch(TypedDict, closed=True):
     name: NotRequired[str]
     members: NotRequired[list[Member]]
     slack_channel: NotRequired[str | None]
+    teams_webhook_url: NotRequired[str | None]
     expires_in: NotRequired[ExpiresIn]
     on_expiry: NotRequired[OnExpiry]
     default_for: NotRequired[list[WaitingVerdict]]
+
+
+TeamsWebhookURL: TypeAlias = str
 
 
 TeamHandle: TypeAlias = str
@@ -954,6 +950,16 @@ class TrustRuleCreate(TypedDict, closed=True):
 class TrustRuleList(TypedDict):
     data: list[TrustRule]
     has_more: bool
+
+
+class ApprovalGroupCreate(TypedDict, closed=True):
+    name: str
+    members: list[Member]
+    slack_channel: NotRequired[str]
+    teams_webhook_url: NotRequired[TeamsWebhookURL]
+    expires_in: NotRequired[int]
+    on_expiry: NotRequired[Literal["deny", "allow"]]
+    default_for: NotRequired[list[WaitingVerdict]]
 
 
 class AuditRecord(TypedDict):
