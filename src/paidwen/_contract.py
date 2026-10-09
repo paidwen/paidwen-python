@@ -483,6 +483,12 @@ class AuditExecution(TypedDict):
     error_type: NotRequired[str]
 
 
+class RiskReason(TypedDict):
+    code: str
+    level: RiskLevel
+    text: str
+
+
 KeyDigest: TypeAlias = str
 
 
@@ -1017,25 +1023,6 @@ class Decision(TypedDict):
     decided_at: str
 
 
-class Agent(TypedDict, closed=True):
-    id: str
-    name: str
-    owner: NotRequired[str]
-    team: NotRequired[TeamHandle]
-    description: NotRequired[str]
-    model_provider: NotRequired[str]
-    environment: Environment
-    risk_level: NotRequired[RiskLevel]
-    labels: Labels
-    budget: NotRequired[Budget]
-    record_content: bool
-    status: AgentStatus
-    spent: NotRequired[AgentSpent]
-    trust_rule_id: NotRequired[str]
-    created_at: str
-    updated_at: str
-
-
 class AgentCreate(TypedDict, closed=True):
     name: str
     owner: NotRequired[str]
@@ -1047,11 +1034,6 @@ class AgentCreate(TypedDict, closed=True):
     labels: NotRequired[Labels]
     budget: NotRequired[Budget]
     record_content: NotRequired[bool]
-
-
-class AgentList(TypedDict):
-    data: list[Agent]
-    has_more: bool
 
 
 class TrustRule(TypedDict, closed=True):
@@ -1137,6 +1119,16 @@ class AuditRecord(TypedDict):
     lines: NotRequired[list[dict[str, Any]]]
 
 
+class AgentRisk(TypedDict):
+    """
+    The risk level that Paidwen computes from the permissions and the behavior of the agent, every 5 minutes. The level is the highest level of its reasons, and never lower than the declared risk_level.
+    """
+
+    level: RiskLevel
+    computed_at: NotRequired[str]
+    reasons: NotRequired[list[RiskReason]]
+
+
 class SnapshotAgent(TypedDict, closed=True):
     id: str
     name: str
@@ -1144,6 +1136,7 @@ class SnapshotAgent(TypedDict, closed=True):
     team: NotRequired[str]
     environment: Environment
     risk_level: NotRequired[RiskLevel]
+    risk: NotRequired[RiskLevel]
     labels: NotRequired[Labels]
     key_digests: list[KeyDigest]
     permissions: NotRequired[AgentPermissions]
@@ -1196,6 +1189,31 @@ class SessionStep(TypedDict):
 class SessionStepList(TypedDict):
     session_id: str
     data: list[SessionStep]
+    has_more: bool
+
+
+class Agent(TypedDict, closed=True):
+    id: str
+    name: str
+    owner: NotRequired[str]
+    team: NotRequired[TeamHandle]
+    description: NotRequired[str]
+    model_provider: NotRequired[str]
+    environment: Environment
+    risk_level: NotRequired[RiskLevel]
+    labels: Labels
+    budget: NotRequired[Budget]
+    record_content: bool
+    status: AgentStatus
+    spent: NotRequired[AgentSpent]
+    risk: NotRequired[AgentRisk]
+    trust_rule_id: NotRequired[str]
+    created_at: str
+    updated_at: str
+
+
+class AgentList(TypedDict):
+    data: list[Agent]
     has_more: bool
 
 
