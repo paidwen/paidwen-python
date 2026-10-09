@@ -6,6 +6,8 @@ import anyio
 import pytest
 from fake import FakePaidwen, decision, serve, until
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from paidwen import DeniedError, Paidwen
 
@@ -100,6 +102,82 @@ def test_a_model_call_after_the_close_is_dropped(fake: FakePaidwen) -> None:
     ).end()
     assert fake.traces == []
     provider.shutdown()
+
+
+def test_the_tool_call_carries_the_session_of_the_context(fake: FakePaidwen) -> None:
+    paidwen = Paidwen("pw_test_key", base_url=fake.url)
+
+    @paidwen.tool("search")
+    def search() -> None:
+        return None
+
+    with paidwen.context(session_id="session-4821"):
+        search()
+    paidwen.flush()
+    until("the span", lambda: len(fake.spans()) == 1)
+    assert fake.spans()[0].attributes["gen_ai.conversation.id"] == "session-4821"
+    paidwen.close()
+
+
+def test_the_copy_of_a_model_call_carries_the_session_of_the_context(fake: FakePaidwen) -> None:
+    paidwen = Paidwen("pw_test_key", base_url=fake.url)
+    own = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(paidwen.span_processor())
+    provider.add_span_processor(SimpleSpanProcessor(own))
+    with paidwen.context(session_id="session-4821"):
+        provider.get_tracer("an-instrumentation").start_span(
+            "chat gpt-4o-mini",
+            attributes={"gen_ai.operation.name": "chat", "gen_ai.request.model": "gpt-4o-mini"},
+        ).end()
+    provider.force_flush()
+    until("the model call", lambda: len(fake.spans()) == 1)
+    [sent] = fake.spans()
+    [kept] = own.get_finished_spans()
+    assert sent.attributes["gen_ai.conversation.id"] == "session-4821"
+    assert sent.attributes["gen_ai.request.model"] == "gpt-4o-mini"
+    assert sent.name == "chat gpt-4o-mini"
+    assert sent.trace_id == f"{kept.context.trace_id:032x}"
+    assert sent.span_id == f"{kept.context.span_id:016x}"
+    assert "gen_ai.conversation.id" not in (kept.attributes or {})
+    provider.shutdown()
+    paidwen.close()
+
+
+def test_a_model_call_keeps_the_session_it_already_carries(fake: FakePaidwen) -> None:
+    paidwen = Paidwen("pw_test_key", base_url=fake.url)
+    provider = TracerProvider()
+    provider.add_span_processor(paidwen.span_processor())
+    with paidwen.context(session_id="session-4821"):
+        provider.get_tracer("an-instrumentation").start_span(
+            "chat gpt-4o-mini",
+            attributes={"gen_ai.operation.name": "chat", "gen_ai.conversation.id": "thread-17"},
+        ).end()
+    provider.force_flush()
+    until("the model call", lambda: len(fake.spans()) == 1)
+    assert fake.spans()[0].attributes["gen_ai.conversation.id"] == "thread-17"
+    provider.shutdown()
+    paidwen.close()
+
+
+def test_no_span_carries_a_session_outside_a_context(fake: FakePaidwen) -> None:
+    paidwen = Paidwen("pw_test_key", base_url=fake.url)
+    provider = TracerProvider()
+    provider.add_span_processor(paidwen.span_processor())
+
+    @paidwen.tool("search")
+    def search() -> None:
+        return None
+
+    provider.get_tracer("an-instrumentation").start_span(
+        "chat gpt-4o-mini", attributes={"gen_ai.operation.name": "chat"}
+    ).end()
+    search()
+    paidwen.flush()
+    until("the spans", lambda: len(fake.spans()) == 2)
+    assert all("gen_ai.conversation.id" not in span.attributes for span in fake.spans())
+    provider.shutdown()
+    paidwen.close()
 
 
 def test_the_tool_call_is_a_child_of_the_active_span_of_the_agent(fake: FakePaidwen) -> None:

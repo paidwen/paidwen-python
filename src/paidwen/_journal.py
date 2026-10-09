@@ -15,9 +15,10 @@ from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 
-from ._context import silenced
+from ._context import scope, silenced
 
 ACTION_STARTED = "paidwen.action.started"
+CONVERSATION_ID = "gen_ai.conversation.id"
 SETTLE_LIMIT = 1.0
 MODEL_OPERATIONS = frozenset({"chat", "text_completion", "generate_content", "embeddings"})
 
@@ -51,6 +52,32 @@ class _SilentExporter(SpanExporter):
 def is_model_call(span: ReadableSpan) -> bool:
     operation = (span.attributes or {}).get("gen_ai.operation.name")
     return isinstance(operation, str) and operation in MODEL_OPERATIONS
+
+
+def _session_attributes() -> dict[str, Any]:
+    session = scope().session_id
+    return {} if session is None else {CONVERSATION_ID: session}
+
+
+def _in_session(span: ReadableSpan) -> ReadableSpan:
+    session = scope().session_id
+    attributes = span.attributes or {}
+    if session is None or CONVERSATION_ID in attributes:
+        return span
+    return ReadableSpan(
+        name=span.name,
+        context=span.context,
+        parent=span.parent,
+        resource=span.resource,
+        attributes={**attributes, CONVERSATION_ID: session},
+        events=span.events,
+        links=span.links,
+        kind=span.kind,
+        status=span.status,
+        start_time=span.start_time,
+        end_time=span.end_time,
+        instrumentation_scope=span.instrumentation_scope,
+    )
 
 
 class _ModelProcessor(SpanProcessor):
@@ -111,6 +138,7 @@ class Journal:
             context=otel_context.get_current(),
             kind=SpanKind.INTERNAL,
             attributes={"gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name}
+            | _session_attributes()
             | attributes,
         )
 
@@ -121,7 +149,7 @@ class Journal:
         with self._lock:
             if self._closed:
                 return
-            future = self._sender.submit(exporter.export, [span])
+            future = self._sender.submit(exporter.export, [_in_session(span)])
             self._pending.add(future)
         future.add_done_callback(self._done)
 

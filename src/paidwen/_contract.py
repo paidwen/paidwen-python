@@ -597,6 +597,66 @@ class Action(TypedDict):
     execution: NotRequired[AuditExecution]
 
 
+class AgentSession(TypedDict):
+    """
+    A session of one or more agents, read from the journal.
+    """
+
+    id: str
+    cursor: str
+    agents: list[AuditAgent]
+    started_at: str
+    ended_at: str
+    steps: int
+    decisions: int
+    blocked: int
+    waited: int
+    errors: int
+    cost_usd: float
+
+
+class AgentSessionList(TypedDict):
+    data: list[AgentSession]
+    has_more: bool
+
+
+class Part(TypedDict):
+    type: str
+
+
+class ModelMessage(TypedDict):
+    """
+    A message of a call to the model, as the OpenTelemetry conventions for generative AI describe it. Each part carries its type, such as text, reasoning, tool_call or tool_call_response.
+    """
+
+    role: str
+    parts: list[Part]
+    finish_reason: NotRequired[str]
+
+
+class SessionModelCall(TypedDict):
+    """
+    A call to the model, read from its journal line.
+    """
+
+    span_id: str
+    agent: AuditAgent
+    provider: NotRequired[str]
+    model: NotRequired[str]
+    operation: NotRequired[str]
+    started_at: str
+    ended_at: str
+    status: Literal["ok", "error"]
+    error_type: NotRequired[str]
+    input_tokens: NotRequired[int]
+    output_tokens: NotRequired[int]
+    cost_usd: NotRequired[float]
+    history: int
+    system_instructions: NotRequired[list[dict[str, Any]]]
+    input: NotRequired[list[ModelMessage]]
+    output: NotRequired[list[ModelMessage]]
+
+
 class ActionList(TypedDict):
     data: list[Action]
     has_more: bool
@@ -1031,3 +1091,17 @@ class ConformanceCase(TypedDict, closed=True):
     rules: list[ConformanceRule]
     request: DecisionRequest
     expected: ConformanceExpectation
+
+
+class SessionStep(TypedDict):
+    kind: Literal["model_call", "action"]
+    at: str
+    cursor: str
+    model_call: NotRequired[SessionModelCall]
+    action: NotRequired[AuditRecord]
+
+
+class SessionStepList(TypedDict):
+    session_id: str
+    data: list[SessionStep]
+    has_more: bool
