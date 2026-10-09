@@ -104,6 +104,8 @@ When the organization has used all the events its plan allows this month, Paidwe
 
 Each tool call goes to the journal of Paidwen as an OpenTelemetry span, with its decision, its start and its result. The span is a child of the active OpenTelemetry span of the agent.
 
+When the `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` environment variable is `true`, `span_only` or `span_and_event`, the SDK also sends what each wrapped function and each MCP call returns, up to 65,536 characters, so that the firewall of Paidwen scores the outputs of the tools.
+
 To journal the model calls that your OpenTelemetry instrumentations describe, add the span processor of Paidwen to your tracer provider:
 
 ```python

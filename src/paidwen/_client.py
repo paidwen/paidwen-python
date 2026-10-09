@@ -41,7 +41,7 @@ from ._credentials import (
     identity_token_file,
 )
 from ._errors import DeniedError, PaidwenError, PendingError, RequestError, reason_of
-from ._journal import Journal, finish, quiet_call, started, trace_id, traceparent
+from ._journal import Journal, dumped, finish, quiet_call, started, trace_id, traceparent
 
 Fallback = Literal["allow", "block"]
 OnPending = Literal["wait", "raise"]
@@ -56,6 +56,7 @@ MISSING_IDENTITY = (
     "Paidwen needs an agent key or an identity token: pass api_key, identity_token_file or "
     "identity_token, or set PAIDWEN_API_KEY or PAIDWEN_IDENTITY_TOKEN_FILE."
 )
+CAPTURED_CONTENT = frozenset({"true", "span_only", "span_and_event"})
 
 _CAPTURED = "_paidwen_captured"
 
@@ -124,7 +125,11 @@ class Paidwen:
             api_key, identity_token_file, identity_token, base, self._client, timeout
         )
         self._journal = Journal(
-            f"{base}/v1/traces", self._credentials.authorization, journal, VERSION
+            f"{base}/v1/traces",
+            self._credentials.authorization,
+            journal,
+            _captures_content(),
+            VERSION,
         )
         self._release_http: Callable[[], None] | None = None
         self._agent_id: str | None = None
@@ -380,6 +385,7 @@ class Paidwen:
 
     def _close(self, span: Span, result: Any, status_of: Callable[[Any], int] | None) -> None:
         if status_of is None:
+            self._journal.set_result(span, result)
             finish(span)
             return
         code = status_of(result)
@@ -644,6 +650,11 @@ def _credentials_of(
     raise PaidwenError(MISSING_IDENTITY)
 
 
+def _captures_content() -> bool:
+    mode = os.environ.get("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "")
+    return mode.lower() in CAPTURED_CONTENT
+
+
 def _problem(response: httpx.Response) -> Problem | None:
     try:
         body = response.json()
@@ -684,13 +695,8 @@ def _params(
     return params
 
 
-def _dumped(request: Any) -> Any:
-    dump = getattr(request, "model_dump", None)
-    return dump(by_alias=True, mode="json", exclude_none=True) if callable(dump) else request
-
-
 def _with_meta(request: Any, carrier: Carrier) -> Any:
-    data = _dumped(request)
+    data = dumped(request)
     params = data.get("params") if isinstance(data, Mapping) else None
     if not isinstance(params, Mapping):
         return request
@@ -705,7 +711,7 @@ def _with_meta(request: Any, carrier: Carrier) -> Any:
 
 
 def _tool_call(session: Any, request: Any) -> tuple[Tool, dict[str, Any]] | None:
-    data = _dumped(request)
+    data = dumped(request)
     if not isinstance(data, Mapping) or data.get("method") != "tools/call":
         return None
     params = data.get("params")

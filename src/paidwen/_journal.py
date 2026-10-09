@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from collections.abc import Callable, Sequence
@@ -11,7 +12,7 @@ from opentelemetry import context as otel_context
 from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, SpanLimits, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 
@@ -21,6 +22,8 @@ ACTION_STARTED = "paidwen.action.started"
 CONVERSATION_ID = "gen_ai.conversation.id"
 SETTLE_LIMIT = 1.0
 MODEL_OPERATIONS = frozenset({"chat", "text_completion", "generate_content", "embeddings"})
+TOOL_RESULT = "gen_ai.tool.call.result"
+ATTRIBUTE_LENGTH_LIMIT = 65_536
 
 logger = logging.getLogger("paidwen")
 
@@ -80,6 +83,20 @@ def _in_session(span: ReadableSpan) -> ReadableSpan:
     )
 
 
+def dumped(value: Any) -> Any:
+    dump = getattr(value, "model_dump", None)
+    return dump(by_alias=True, mode="json", exclude_none=True) if callable(dump) else value
+
+
+def _serialized(result: Any) -> str | None:
+    if result is None or isinstance(result, str):
+        return result
+    try:
+        return json.dumps(dumped(result), ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        return None
+
+
 class _ModelProcessor(SpanProcessor):
     def __init__(self, journal: Journal) -> None:
         self._journal = journal
@@ -109,13 +126,20 @@ class _Authorization(requests.auth.AuthBase):
 
 class Journal:
     def __init__(
-        self, endpoint: str, authorization: Callable[[], str], enabled: bool, version: str
+        self,
+        endpoint: str,
+        authorization: Callable[[], str],
+        enabled: bool,
+        capture_content: bool,
+        version: str,
     ) -> None:
         self._exporter: SpanExporter | None = None
+        self._capture_content = capture_content
         self._provider = TracerProvider(
             resource=Resource.create(
                 {"service.name": "paidwen-sdk", "telemetry.sdk.language": "python"}
-            )
+            ),
+            span_limits=SpanLimits(max_attribute_length=ATTRIBUTE_LENGTH_LIMIT),
         )
         if enabled:
             session = requests.Session()
@@ -141,6 +165,13 @@ class Journal:
             | _session_attributes()
             | attributes,
         )
+
+    def set_result(self, span: Span, result: Any) -> None:
+        if not self._capture_content:
+            return
+        value = _serialized(result)
+        if value is not None:
+            span.set_attribute(TOOL_RESULT, value)
 
     def report(self, span: ReadableSpan) -> None:
         exporter = self._exporter

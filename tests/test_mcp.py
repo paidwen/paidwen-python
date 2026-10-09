@@ -5,7 +5,7 @@ from typing import Any
 import anyio
 import httpx
 import pytest
-from fake import AGENT_ID, CLIENT_TRACEPARENT, parent
+from fake import AGENT_ID, CLIENT_TRACEPARENT, parent, serve, until
 from mcp import ClientSession
 from mcp.client.client import Client
 from mcp.server.mcpserver import Context, MCPServer
@@ -130,6 +130,30 @@ def test_mcp_puts_the_trace_and_the_baggage_of_the_tool_in_the_meta_of_the_call(
         "acme",
         own,
     )
+
+
+def test_mcp_sends_the_answer_of_a_tools_call_as_the_result_of_its_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    with serve() as fake:
+        paidwen = Paidwen("pw_test_key", base_url=fake.url)
+        release = paidwen.mcp(ClientSession)
+        try:
+
+            async def call() -> Any:
+                async with Client(payments([])) as client:
+                    return await client.call_tool("refund", {"order": "4821", "amount": 120})
+
+            result = run(call)
+        finally:
+            release()
+        paidwen.flush()
+        until("the span", lambda: len(fake.spans()) == 1)
+        paidwen.close()
+        answer = json.loads(fake.spans()[0].attributes["gen_ai.tool.call.result"])
+    assert answer == result.model_dump(by_alias=True, mode="json", exclude_none=True)
+    assert answer["content"] == [{"type": "text", "text": "refunded 120"}]
 
 
 @pytest.mark.parametrize(

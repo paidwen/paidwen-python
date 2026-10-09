@@ -1,21 +1,42 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import anyio
 import pytest
-from fake import FakePaidwen, decision, serve, until
+from fake import FakePaidwen, Span, decision, serve, until
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from paidwen import DeniedError, Paidwen
 
+CAPTURE = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
+RESULT = "gen_ai.tool.call.result"
+
 
 @pytest.fixture
 def fake() -> Iterator[FakePaidwen]:
     with serve() as server:
         yield server
+
+
+def capturing(mode: str | None, fake: FakePaidwen, monkeypatch: pytest.MonkeyPatch) -> Paidwen:
+    if mode is None:
+        monkeypatch.delenv(CAPTURE, raising=False)
+    else:
+        monkeypatch.setenv(CAPTURE, mode)
+    paidwen = Paidwen("pw_test_key", base_url=fake.url)
+    monkeypatch.delenv(CAPTURE, raising=False)
+    return paidwen
+
+
+def sent(paidwen: Paidwen, fake: FakePaidwen, count: int) -> list[Span]:
+    paidwen.flush()
+    until("the spans", lambda: len(fake.spans()) == count)
+    paidwen.close()
+    return fake.spans()
 
 
 def test_each_tool_call_is_an_execute_tool_span_sent_with_the_key_of_the_agent(
@@ -208,3 +229,107 @@ def test_journal_false_sends_nothing(fake: FakePaidwen) -> None:
     paidwen.flush()
     paidwen.close()
     assert fake.traces == []
+
+
+def test_the_tool_call_carries_what_the_tool_returns_when_the_content_capture_is_on(
+    fake: FakePaidwen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paidwen = capturing("true", fake, monkeypatch)
+    refunded = {"refund": "re_1", "amount": 120, "currency": "EUR", "note": "remboursé"}
+
+    @paidwen.tool("search")
+    async def search() -> str:
+        return "3 orders"
+
+    @paidwen.tool("payments.refund")
+    def refund(amount: int) -> dict[str, Any]:
+        return refunded
+
+    assert anyio.run(search) == "3 orders"
+    assert refund(120) is refunded
+    first, second = sent(paidwen, fake, 2)
+    assert first.attributes[RESULT] == "3 orders"
+    assert second.attributes[RESULT] == (
+        '{"refund":"re_1","amount":120,"currency":"EUR","note":"remboursé"}'
+    )
+
+
+@pytest.mark.parametrize("mode", ["SPAN_ONLY", "span_and_event"])
+def test_span_only_and_span_and_event_capture_the_result_in_upper_or_lower_case(
+    fake: FakePaidwen, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    paidwen = capturing(mode, fake, monkeypatch)
+
+    @paidwen.tool("search")
+    def search() -> str:
+        return "3 orders"
+
+    search()
+    [span] = sent(paidwen, fake, 1)
+    assert span.attributes[RESULT] == "3 orders"
+
+
+@pytest.mark.parametrize("mode", [None, "false", "EVENT_ONLY"])
+def test_the_tool_call_carries_no_result_when_the_content_capture_is_off(
+    fake: FakePaidwen, monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    paidwen = capturing(mode, fake, monkeypatch)
+
+    @paidwen.tool("search")
+    def search() -> str:
+        return "3 orders"
+
+    search()
+    [span] = sent(paidwen, fake, 1)
+    assert RESULT not in span.attributes
+
+
+def test_the_tool_call_carries_no_result_when_the_tool_raises_or_paidwen_refuses_it(
+    fake: FakePaidwen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paidwen = capturing("true", fake, monkeypatch)
+
+    @paidwen.tool("search")
+    def search(fail: bool) -> str:
+        if fail:
+            raise TimeoutError("The search timed out.")
+        return "3 orders"
+
+    with pytest.raises(TimeoutError):
+        search(True)
+    fake.answer = lambda request: decision(request, "block", rule_id="no-search")
+    with pytest.raises(DeniedError):
+        search(False)
+    spans = sent(paidwen, fake, 2)
+    assert [(span.status, RESULT in span.attributes) for span in spans] == [(2, False), (2, False)]
+
+
+def test_a_result_that_json_cannot_carry_is_not_sent_and_the_tool_still_returns_it(
+    fake: FakePaidwen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paidwen = capturing("true", fake, monkeypatch)
+    opaque = object()
+
+    @paidwen.tool("search")
+    def search(empty: bool) -> object:
+        return None if empty else opaque
+
+    assert search(False) is opaque
+    assert search(True) is None
+    spans = sent(paidwen, fake, 2)
+    assert [(span.status, RESULT in span.attributes) for span in spans] == [(1, False), (1, False)]
+
+
+def test_a_result_longer_than_65_536_characters_is_cut(
+    fake: FakePaidwen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paidwen = capturing("true", fake, monkeypatch)
+    pages = "x" * 70_000
+
+    @paidwen.tool("search")
+    def search() -> str:
+        return pages
+
+    assert search() is pages
+    [span] = sent(paidwen, fake, 1)
+    assert span.attributes[RESULT] == pages[:65_536]

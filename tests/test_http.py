@@ -432,6 +432,22 @@ def test_each_captured_call_reaches_the_journal_with_its_status(
     assert len(fake.decisions) == 2
 
 
+def test_a_captured_call_sends_no_result_even_with_the_content_capture_on(
+    api: Api,
+    fake: FakePaidwen,
+    capture: Callable[..., Paidwen],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "true")
+    paidwen = capture(journal=True)
+    httpx.get(f"{api.url}/v1/refunds")
+    requests.get(f"{api.url}/v1/refunds")
+    paidwen.flush()
+    spans = fake.spans()
+    assert len(spans) == 2
+    assert all("gen_ai.tool.call.result" not in span.attributes for span in spans)
+
+
 def test_a_second_capture_is_refused(capture: Callable[..., Paidwen]) -> None:
     paidwen = capture()
     with pytest.raises(PaidwenError, match="already captured"):
