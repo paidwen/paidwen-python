@@ -281,9 +281,14 @@ class RuleCreate(TypedDict, closed=True):
     source_text: NotRequired[str]
 
 
-class DraftRequest(TypedDict, closed=True):
-    text: str
-    agent_id: NotRequired[str]
+class DraftRule(TypedDict, closed=True):
+    """
+    A rule written in CEL. Paidwen reads it back and replays it on the decisions of the last 30 days, without the model, and without counting it in the drafts of the day.
+    """
+
+    condition: str
+    verdict: Verdict
+    approval_group_id: NotRequired[str]
 
 
 DraftKind: TypeAlias = Literal["rule", "permissions", "budget"]
@@ -1075,6 +1080,16 @@ class TrustRuleCreate(TypedDict, closed=True):
 class TrustRuleList(TypedDict):
     data: list[TrustRule]
     has_more: bool
+
+
+class DraftRequest(TypedDict, closed=True):
+    """
+    Either a sentence that the model translates, or a rule written in CEL that Paidwen checks without the model. Send text or rule, never both.
+    """
+
+    text: NotRequired[str]
+    agent_id: NotRequired[str]
+    rule: NotRequired[DraftRule]
 
 
 DraftPreview = TypedDict(
